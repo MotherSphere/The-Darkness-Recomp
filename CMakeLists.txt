@@ -373,7 +373,9 @@ if(BUILD_TESTING)
     stage_dark_xma(ShaderBytecodeCacheTests)
     add_test(NAME ShaderBytecodeCacheContract COMMAND ShaderBytecodeCacheTests)
     add_test(NAME ShaderBytecodeCacheWarpContract COMMAND ShaderBytecodeCacheTests --warp)
-    set_tests_properties(ShaderBytecodeCacheContract ShaderBytecodeCacheWarpContract PROPERTIES TIMEOUT 30)
+    # A fresh cache now prepares every authored vertex program and clipping
+    # form before exercising the first-use draw contract.
+    set_tests_properties(ShaderBytecodeCacheContract ShaderBytecodeCacheWarpContract PROPERTIES TIMEOUT 120)
     add_executable(DisplayReuseTests tests/display_reuse_tests.cpp)
     target_link_libraries(DisplayReuseTests PRIVATE DarkRuntime)
     stage_dark_xma(DisplayReuseTests)

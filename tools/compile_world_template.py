@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 from compile_vertex_template import ASSETS, parse
 
 MODES = {'texcoord': 0, 'linear': 1, 'void': 4, 'shadowvolume2': 7, 'mspos': 8, 'constant': 9,
@@ -15,6 +16,28 @@ MODES = {'texcoord': 0, 'linear': 1, 'void': 4, 'shadowvolume2': 7, 'mspos': 8, 
          'tslv': 20, 'depthoffset': 22, 'tang_u': 23, 'tang_v': 24, 'Lighting_Nonormal': 16}
 WORLD_ASSETS = ASSETS | {'System/Xenon/ProgramCache.xpc':
     'e5f5d6a29761cf884a11655911d3affcbb6024e59a5f7fb2c592a675a081966b'}
+
+
+def vertex_program_descriptors(data):
+    """Retain authored descriptor keys, never the original GPU bytecode.
+
+    Each vertex record has a 17-byte prefix, the engine's first 20 descriptor
+    bytes, a big-endian bytecode length, then that many bytecode bytes. The
+    native renderer decodes these keys with the same path used by live draws.
+    """
+    if len(data) < 100:
+        raise ValueError('Truncated vertex cache header')
+    count = struct.unpack_from('>I', data, 96)[0]
+    offset, descriptors = 100, []
+    for _ in range(count):
+        if len(data) - offset < 41:
+            raise ValueError('Truncated vertex cache record')
+        length = struct.unpack_from('>I', data, offset + 37)[0]
+        if length > len(data) - offset - 41:
+            raise ValueError('Truncated vertex cache bytecode')
+        descriptors.append(data[offset + 17:offset + 37].hex())
+        offset += 41 + length
+    return descriptors
 
 
 def condition(name):
@@ -150,6 +173,8 @@ VertexOutput vertexMain(VertexInput input) {
     hlsl += '\n'.join(f'    output.tex[{s}] = _oT{s};' for s in range(8))
     hlsl += '\n    return output;\n}\n'
     return hlsl, {'assets': WORLD_ASSETS, 'modes': MODES,
+                  'vertex_program_descriptors': vertex_program_descriptors(
+                      sources['System/Xenon/ProgramCache.xpc'].encode('latin-1')),
                   'constant_mode9_stages': [3, 4, 5],
                   'shadowvolume2_mode7_stages': [0],
                   'wspos_mode10_stages': [1],
@@ -164,10 +189,17 @@ def main():
     parser.add_argument('--output-dir', type=Path, required=True)
     args = parser.parse_args()
     source, manifest = translate(args.game_dir)
+    descriptor_keys = manifest['vertex_program_descriptors']
+    header = '#pragma once\n#include <array>\n#include <cstdint>\nnamespace DarkRecomp {\n'
+    header += 'inline constexpr char engineWorldTemplateSource[] = R"DARKWORLD(' + source + ')DARKWORLD";\n'
+    header += f'inline constexpr std::array<std::array<uint8_t,20>,{len(descriptor_keys)}> engineWorldVertexDescriptorKeys{{{{\n'
+    header += ''.join('    {' + ','.join(f'0x{x:02X}' for x in bytes.fromhex(key)) + '},\n'
+                      for key in descriptor_keys)
+    header += '}};\n}\n'
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, content in {
         'engine_world_template.hlsl': source,
-        'engine_world_template.generated.h': '#pragma once\nnamespace DarkRecomp {\ninline constexpr char engineWorldTemplateSource[] = R"DARKWORLD(' + source + ')DARKWORLD";\n}\n',
+        'engine_world_template.generated.h': header,
         'engine_world_template.source.json': json.dumps(manifest, indent=2) + '\n',
     }.items():
         path = args.output_dir / name

@@ -23,6 +23,7 @@ class WorldVertexShaderD3D11 {
     std::optional<Native::WorldVertexConstants> uploadedConstants_;
     WorldConstantRanges constantRanges_=WorldConstantRanges::full();
     bool vectorsUploaded_=false,referencesUploaded_=false;
+    bool compiled_=false;
     uint64_t constantUploadCount_=0,constantCompareCalls_=0,constantCompareReadBytes_=0;
     uint64_t constantPlansBuilt_=0,referenceUploadCount_=0;
 public:
@@ -31,6 +32,7 @@ public:
     bool bind(ID3D11DeviceContext*,const Native::WorldVertexConstants&,std::span<const Native::WorldVertex>,
               const std::array<std::array<float,2>,8>* indexBounds=nullptr,bool alreadyBound=false);
     ID3DBlob* bytecode() const {return code_.Get();}
+    bool compiled() const {return compiled_;}
     uint64_t constantUploadCount() const {return constantUploadCount_;}
     uint64_t constantCompareCalls() const {return constantCompareCalls_;}
     uint64_t constantCompareReadBytes() const {return constantCompareReadBytes_;}
@@ -110,6 +112,7 @@ class WorldRendererD3D11 {
     DescriptorCache<D3D11_RASTERIZER_DESC,Ptr<ID3D11RasterizerState>> rasterStates_;
     DescriptorCache<D3D11_SAMPLER_DESC,Ptr<ID3D11SamplerState>> samplerStates_;
     StringCache<std::unique_ptr<WorldVertexShaderD3D11>> shaders_;
+    uint64_t vertexShaderCompileCount_=0;
     std::unordered_map<uint64_t,Surface> surfaces_;
     struct Image {std::shared_ptr<const ColorImage> source;Ptr<ID3D11ShaderResourceView> view;uint64_t used=0;size_t bytes=0;};
     std::unordered_map<const ColorImage*,Image> images_;
@@ -266,6 +269,8 @@ public:
     // initialization leaves current immediate-context bindings unchanged.
     bool preloadImage(const std::shared_ptr<const ColorImage>&);
     uint64_t imageUploadCount() const {return imageUploads_;}
+    size_t vertexShaderCount() const {return shaders_.size();}
+    uint64_t vertexShaderCompileCount() const {return vertexShaderCompileCount_;}
     bool draw(const Native::WorldDraw&);
     void clear(const Native::WorldClear&);
     bool resolve(const Native::WorldResolve&);
