@@ -1,4 +1,3 @@
-#include <fstream>
 #include <intrin.h>
 #include "runtime/native/runtime.h"
 #include "runtime/native/stall_profiler.h"
@@ -74,9 +73,21 @@ static void printAudioHealth() {
         audio.queuedBuffers,audio.queuedFrames,unsigned(audio.playbackStarted),audio.starvationPasses,
         audio.starvationBytes,audio.engineGlitches,audio.maxCallbackMicros,unsigned(audio.workerMmcss),audio.deviceErrors);
 }
+static bool takeProfiledNativeMessage(MSG& message) noexcept {
+    // PeekMessage can synchronously deliver sent window messages even when
+    // it returns no queued message. Attribute that work separately from input.
+    StallProfiler::Scope profile(StallProfiler::Section::Other, "native PeekMessage");
+    return takeNativeMessage(message);
+}
 static LRESULT CALLBACK NativeWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (nativeInput().windowMessage(window, message, wParam, lParam))
-        return message == WM_XBUTTONDOWN || message == WM_XBUTTONUP ? TRUE : 0;
+    StallProfiler::Scope callback(StallProfiler::Section::Other, "NativeWindowProc",
+        0, 0, message, "win32-message");
+    {
+        StallProfiler::Scope input(StallProfiler::Section::Other, "NativeWindowProc input",
+            0, 0, message, "win32-message");
+        if (nativeInput().windowMessage(window, message, wParam, lParam))
+            return message == WM_XBUTTONDOWN || message == WM_XBUTTONUP ? TRUE : 0;
+    }
     if (resolutionShortcut.handle(message, wParam, lParam)) return 0;
     if (message == WM_GETMINMAXINFO) {
         RECT minimum{0, 0, 320, 180};
@@ -96,10 +107,15 @@ static LRESULT CALLBACK NativeWindowProc(HWND window, UINT message, WPARAM wPara
     // The modeless panel keeps rendering/engine updates running, but game
     // input and mouse capture stay suspended even if the owner gets focus.
     if (mouseWindow && (!developerToolsWindow || !developerToolsWindow->isOpen()) &&
-        (!achievementsWindow || !achievementsWindow->isOpen()) &&
-        mouseWindow->message(message, wParam, lParam)) return 0;
+        (!achievementsWindow || !achievementsWindow->isOpen())) {
+        StallProfiler::Scope mouse(StallProfiler::Section::Other, "NativeWindowProc mouse",
+            0, 0, message, "win32-message");
+        if (mouseWindow->message(message, wParam, lParam)) return 0;
+    }
     if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
     if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    StallProfiler::Scope defaultProc(StallProfiler::Section::Other, "native DefWindowProc",
+        0, 0, message, "win32-message");
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
@@ -227,6 +243,7 @@ int wmain(int argc, wchar_t** argv) {
             fputs("Usage: DarkRecomp [--game-dir <directory>] [--timeout-ms N (default 0, no deadline)] [--renderer-smoke] [--trace-renderer <new directory>] [--engine-preview | --no-engine-preview] [--mute] [--fps 60 (default; 0 uncapped)] [--profile-engine] [--sample-engine] [--mouse-sensitivity 1.0] [--language auto|en|de|fr|es|it] [--preview-frame <new BMP path>] [--test-input <file>] [--test-start] [--test-skip-intros]\n", stderr);
             fputs("  Starts with gameplay rendering and sound. Without --game-dir, finds Darkness beside the installed EXE or its parent folders.\n", stderr);
             fputs("  --test-input file lines (max 64, own-process diagnostics only): numeric '<key> [<holdMs 1..10000>]' (bare menu keys hold 250ms, I/J/K/L hold 2000ms; gameplay keys WASD/E/R/F/X/Z/C/Q/G/1-4/Tab/Back/Shift/Ctrl plus arrows/Space/Return/Esc/IJKL; 116=F5 panel,117=gated F6); 'mouse <dx> <dy>' (+/-10000, held 2000ms); 'capture' game screenshots; '0' inspects; 'dev open|close|status|defaults', 'dev mission <ID>', 'dev speed <preset>', 'dev invincible|noclip|resolution on|off', 'dev darkness unlock|max', 'dev capture <absolute BMP path>'; an invalid line blocks later commands until that line is fixed.\n", stderr);
+            fputs("  Complete each --test-input command with a newline; an owned worker reads at 250ms intervals and publishes after two matching reads. Dispatch checks every 250ms (normally about 750ms total latency). Maximum file size: 256KiB.\n", stderr);
             fputs("  Display: --fullscreen or --windowed; --width W --height H selects window/aspect size; --render-height H controls internal resolution (180..2160, default 720). Alt+Enter toggles borderless fullscreen; enable the F6 resolution shortcut in the F5 developer panel to switch live 720p/1440p when started with a 720-high guest mode (disabled by default).\n", stderr);
             fputs("  Options > Video Settings contains native PC graphics controls. Saved settings apply unless explicitly overridden. --vsync / --no-vsync overrides vertical sync; --fov 0 (Original) or 60..120 overrides horizontal FOV at 16:9 for this run.\n", stderr);
             fputs("  --trace-frame-hitches records bounded slow-frame stage timings without enabling per-draw profiling or instruction sampling.\n", stderr);
@@ -425,6 +442,13 @@ int wmain(int argc, wchar_t** argv) {
         unsigned testInputInvalidLogs=0;
         size_t liveInputCount=0,captureInputCount=0;
         ULONGLONG inputCaptureAt=0,nextInputRead=0;bool liveKey=false;
+        NativeTestInputFileReader testInputReader(testInputPath,
+            [](const std::filesystem::path& path, HANDLE stop) {
+                StallProfiler::Scope read(StallProfiler::Section::FileIO, "native diagnostic script background read");
+                return NativeTestInputFileReader::readFile(path, stop);
+            });
+        if (!testInputPath.empty())
+            std::puts("[InputTest] script reads run on an owned worker; complete newline commands publish after two matching reads (250ms polling plus 250ms dispatch, normally about 750ms total latency).");
         bool testMouse=false;LONG testMouseX=0,testMouseY=0;
         InputCounters testMouseBase{};
         ULONGLONG testMouseUntil=0,nextMouseSample=0;
@@ -485,7 +509,11 @@ int wmain(int argc, wchar_t** argv) {
                 loopTop = FrameMetrics::now();
                 outlier.onLoopTop(loopTop);
             }
-            while (takeNativeMessage(message)) {
+            {
+            StallProfiler::Scope drain(StallProfiler::Section::Other, "native message drain");
+            while (takeProfiledNativeMessage(message)) {
+                StallProfiler::Scope dispatch(StallProfiler::Section::Other, "native message handling",
+                    0, 0, message.message, "win32-message");
                 if (keyboardMenuInputBlocked() && message.hwnd == window &&
                     (message.message == WM_KEYDOWN || message.message == WM_KEYUP ||
                      message.message == WM_SYSKEYDOWN || message.message == WM_SYSKEYUP)) {
@@ -512,29 +540,45 @@ int wmain(int argc, wchar_t** argv) {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            }
             if (message.message == WM_QUIT) break;
-            if (!developerTools.isOpen() && !keyboardMenuInputBlocked()) achievements.update();
-            mouse.updateGameplayCapture(!developerTools.isOpen() && !achievements.isOpen());
+            {
+                StallProfiler::Scope update(StallProfiler::Section::Other, "native achievements update");
+                if (!developerTools.isOpen() && !keyboardMenuInputBlocked()) achievements.update();
+            }
+            {
+                StallProfiler::Scope capture(StallProfiler::Section::Other, "native mouse capture update");
+                mouse.updateGameplayCapture(!developerTools.isOpen() && !achievements.isOpen());
+            }
             KeyboardMenuSaveRequest keyboardSave;
+            {
+            StallProfiler::Scope requests(StallProfiler::Section::Other, "native input settings requests");
             if (takeMouseSensitivitySaveRequest()) {
+                StallProfiler::Scope save(StallProfiler::Section::FileIO, "native mouse sensitivity save");
                 const auto value = nativeInput().mouseSensitivity();
                 const bool saved = DarkRecomp::saveMouseSensitivity(settingsPath, value);
                 reportMouseSensitivitySave(saved);
                 std::printf("[MouseSettings] Sensitivity=%.6g save=%u\n", double(value), unsigned(saved));
             }
             if (takeKeyboardMenuSaveRequest(keyboardSave)) {
+                StallProfiler::Scope save(StallProfiler::Section::FileIO, "native keyboard bindings save");
                 const bool saved = DarkRecomp::saveKeyboardBindings(settingsPath, keyboardSave.bindings) &&
                                    nativeInput().setKeyboardBindings(keyboardSave.bindings);
                 reportKeyboardMenuSave(keyboardSave.id, saved);
                 std::printf("[KeyboardMenu] Save id=%llu success=%u\n", keyboardSave.id, unsigned(saved));
+            }
             }
             if (takeExitGameRequest()) {
                 std::puts("[Menu] Exit Game confirmed; closing native display.");
                 PostMessageW(window, WM_CLOSE, 0, 0);
                 continue;
             }
-            resolutionStatus.update();
+            {
+                StallProfiler::Scope status(StallProfiler::Section::Other, "native resolution status update");
+                resolutionStatus.update();
+            }
             try {
+                StallProfiler::Scope settings(StallProfiler::Section::Other, "native display settings and resize");
                 const bool frameOpen=preview && preview->frameInProgress();
                 if (!frameOpen) {
                     if (resolutionShortcut.takeToggle()) {
@@ -550,6 +594,7 @@ int wmain(int argc, wchar_t** argv) {
                             const auto resizeStarted = FrameMetrics::now();
                             bool resized = false;
                             try {
+                                StallProfiler::Scope resize(StallProfiler::Section::Rendering, "native render target resize");
                                 preview->resizeRenderTarget(width, height, nextScale);
                                 resized = true;
                             } catch (const std::exception& resolutionError) {
@@ -579,6 +624,7 @@ int wmain(int argc, wchar_t** argv) {
                         requestDisplaySettingsSave();
                     }
                     if (takeDisplaySettingsSaveRequest()) {
+                        StallProfiler::Scope save(StallProfiler::Section::FileIO, "native display settings save");
                         displayReuse.invalidate();
                         const bool saved = DarkRecomp::saveDisplaySettings(settingsPath, fieldOfViewSetting(), graphicsSettings(),
                                                                           gameLanguageSetting());
@@ -590,6 +636,7 @@ int wmain(int argc, wchar_t** argv) {
                     if (selected.frameRateLimit != activeGraphics.frameRateLimit)
                         framePacer.setFrameRate(selected.frameRateLimit);
                     if (selected.fullscreen != displayWindow.fullscreen()) {
+                        StallProfiler::Scope fullscreen(StallProfiler::Section::Other, "native fullscreen toggle");
                         mouse.suspend(); displayWindow.toggleFullscreen();
                     }
                     // Menu resolution changes still apply at startup. F6 only
@@ -597,6 +644,7 @@ int wmain(int argc, wchar_t** argv) {
                     activeGraphics = selected;
                 }
                 if (displayResizePending && !frameOpen && !IsIconic(window)) {
+                    StallProfiler::Scope resize(StallProfiler::Section::Rendering, "native display target resize");
                     displayResizePending = false;
                     displayReuse.invalidate();
                     RECT size{}; GetClientRect(window, &size);
@@ -616,6 +664,8 @@ int wmain(int argc, wchar_t** argv) {
             // Opt-in integration input enters the same native input adapter
             // exercised by InputContract. It sends no input to another process.
             const auto inputNow=GetTickCount64();
+            {
+            StallProfiler::Scope diagnostic(StallProfiler::Section::Other, "native diagnostic input");
             if(testKey && inputNow>=keyRelease) {
                 MSG keyMessage{window, WM_KEYUP, WPARAM(testKey), 0};
                 if (!nativeInput().windowMessage(window,WM_KEYUP,testKey,0) &&
@@ -633,10 +683,12 @@ int wmain(int argc, wchar_t** argv) {
                 testKey=VK_SPACE;testKeyHoldMs=kTestInputMenuHoldMs;nextIntroSkip=inputNow+5000;
             }
             if(!testKey && !testMouse && !testInputPath.empty() && inputNow>=nextInputRead) {
-                nextInputRead=inputNow+250;std::ifstream stream(testInputPath);size_t count=0;
-                std::string command;
-                while(std::getline(stream,command)) {
-                    if(++count>64)break;
+                StallProfiler::Scope commands(StallProfiler::Section::Other, "native diagnostic command snapshot and dispatch");
+                nextInputRead=inputNow+250;
+                const auto commandsSnapshot = testInputReader.latest();
+                size_t count=0;
+                if (commandsSnapshot) for (const auto& command : *commandsSnapshot) {
+                    ++count;
                     if(count<=liveInputCount)continue;
                     // Explicit diagnostic commands take over from automatic
                     // intro skipping, so synthetic Space cannot activate a
@@ -737,6 +789,7 @@ int wmain(int argc, wchar_t** argv) {
                 testKeyBase=nativeInput().counters();
                 keyRelease=inputNow+testKeyHoldMs;
                 std::printf("[InputTest] pressed key=%u hold=%llums elapsed=%llu\n",testKey,testKeyHoldMs,inputNow-inputTestEpoch);
+            }
             }
             if (outlierOn) {
                 afterPump = FrameMetrics::now();
@@ -987,6 +1040,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         setPreviewFrameBackpressure(false);
         timerResolution.stop();
+        testInputReader.stop();
         sampler.stop();
         developerTools.close();
         achievements.close();

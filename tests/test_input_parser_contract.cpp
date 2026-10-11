@@ -1,5 +1,8 @@
 #include "app/windows/test_input_parser.h"
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
@@ -15,6 +18,112 @@ static void requireReject(const std::string& line) {
     if (parseTestInputKeyLine(line, key, hold))
         throw std::runtime_error("invalid line accepted: " + line);
     require(key == 0xBE && hold == 0xEF, "rejection mutated outputs");
+}
+namespace {
+struct TestEvent {
+    HANDLE value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    TestEvent() { require(value != nullptr, "Cannot create reader test event"); }
+    ~TestEvent() { CloseHandle(value); }
+};
+struct TestScript {
+    std::filesystem::path path;
+    TestScript() {
+        wchar_t directory[MAX_PATH]{}, name[MAX_PATH]{};
+        require(GetTempPathW(MAX_PATH, directory) && GetTempFileNameW(directory, L"dti", 0, name),
+                "Cannot create reader test file");
+        path = name;
+    }
+    ~TestScript() { DeleteFileW(path.c_str()); }
+    void write(std::string_view bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), std::streamsize(bytes.size()));
+        output.close();
+        require(bool(output), "Cannot write reader test file");
+    }
+};
+NativeTestInputFileReader::Snapshot waitSnapshot(NativeTestInputFileReader& reader,
+                                                const std::vector<std::string>& expected) {
+    const auto until = GetTickCount64() + 5000;
+    do {
+        auto snapshot = reader.latest();
+        if (snapshot && *snapshot == expected) return snapshot;
+        Sleep(1);
+    } while (GetTickCount64() < until);
+    throw std::runtime_error("Reader did not publish expected completed snapshot");
+}
+void testScriptReader() {
+    require(completeTestInputLines("32\n87") == std::vector<std::string>{"32"},
+            "Truncated trailing command was published");
+    require(completeTestInputLines("32\r\n\r\n87 100\r\n") == std::vector<std::string>{"32", "", "87 100"},
+            "CRLF or empty-line indexing changed");
+    require(completeTestInputLines("32").empty(), "Unterminated command was published");
+    std::string many;
+    for (unsigned i = 0; i < 65; ++i) many += std::to_string(i) + '\n';
+    const auto bounded = completeTestInputLines(many);
+    require(bounded.size() == 64 && bounded.front() == "0" && bounded.back() == "63",
+            "Reader command bound or indexes changed");
+
+    TestScript file;
+    file.write("32\n87");
+    NativeTestInputFileReader reader(file.path, NativeTestInputFileReader::readFile, 5);
+    const auto original = waitSnapshot(reader, {"32"});
+    file.write("32\n87 100\n");
+    waitSnapshot(reader, {"32", "87 100"});
+    require(*original == std::vector<std::string>{"32"}, "Published snapshot changed during append");
+    file.write("32\ninvalid\n");
+    const auto invalid = waitSnapshot(reader, {"32", "invalid"});
+    file.write("32\n87 300\n");
+    const auto corrected = waitSnapshot(reader, {"32", "87 300"});
+    require((*invalid)[1] == "invalid", "Concurrent rewrite mutated a borrowed snapshot");
+    unsigned key = 0; ULONGLONG hold = 0;
+    require(parseTestInputKeyLine((*corrected)[1], key, hold) && key == 'W' && hold == 300,
+            "Corrected unconsumed command lost its index or duration");
+    reader.stop(); reader.stop();
+    TestEvent stop;
+    file.write(std::string(kTestInputMaxFileBytes + 1, 'x'));
+    require(!NativeTestInputFileReader::readFile(file.path, stop.value), "Oversized script was read");
+
+    // A file can return transient bytes during truncate/rewrite. No single
+    // read is enough to publish a command, including a syntactically valid one.
+    std::atomic<unsigned> reads = 0;
+    std::atomic<bool> stable = false;
+    NativeTestInputFileReader changing(L"injected-reader",
+        [&](const std::filesystem::path&, HANDLE) -> std::optional<std::string> {
+            const auto sequence = ++reads;
+            return stable.load() || sequence % 2 ? "32\n" : "87\n";
+        }, 1);
+    const auto until = GetTickCount64() + 5000;
+    while (reads.load() < 20 && GetTickCount64() < until) Sleep(1);
+    require(reads.load() >= 20 && !changing.latest(), "Unstable rewrite bytes were published");
+    stable = true;
+    waitSnapshot(changing, {"32"});
+    changing.stop();
+
+    // Block the actual read provider after publishing a snapshot. The display
+    // must still obtain that immutable snapshot while file I/O cannot finish.
+    TestEvent blocked;
+    std::atomic<unsigned> blockedReads = 0;
+    NativeTestInputFileReader stalled(L"injected-reader",
+        [&](const std::filesystem::path&, HANDLE stopped) -> std::optional<std::string> {
+            if (++blockedReads >= 3) {
+                SetEvent(blocked.value);
+                WaitForSingleObject(stopped, INFINITE);
+                return {};
+            }
+            return "32\n";
+        }, 1);
+    require(WaitForSingleObject(blocked.value, 5000) == WAIT_OBJECT_0, "Fake read did not reach its block");
+    const auto begin = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < 1000; ++i) {
+        const auto snapshot = stalled.latest();
+        require(snapshot && *snapshot == std::vector<std::string>{"32"}, "Blocked I/O hid completed input");
+    }
+    require(std::chrono::steady_clock::now() - begin < std::chrono::seconds(2),
+            "Snapshot retrieval waited on blocked file I/O");
+    stalled.stop(); // Stop also releases the fake read; no detached lifetime.
+    NativeTestInputFileReader unused(std::filesystem::path{});
+    require(!unused.latest(), "Ordinary gameplay unexpectedly has a diagnostic snapshot");
+}
 }
 int main() {
     try {
@@ -103,9 +212,11 @@ int main() {
         require(isTestInputKey('W') && isTestInputKey(VK_TAB) && isTestInputKey(VK_CONTROL) &&
                 isTestInputKey(VK_F5) && isTestInputKey(VK_F6),
                 "allowlist lost a mapped key");
+        testScriptReader();
         puts("Test input parser contract: historical holds, explicit 1/10000, "
              "rejected bad/trailing/sign/overflow, unchanged outputs, and "
-             "gameplay keys plus F5/F6 verified against the production parser.");
+             "gameplay keys plus F5/F6; asynchronous script snapshots preserve "
+             "complete lines, rewrites, bounds and blocked-I/O isolation.");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "TestInputParserContract: %s\n", error.what());

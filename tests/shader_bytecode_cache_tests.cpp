@@ -2,6 +2,7 @@
 #include "renderer/d3d11/world_renderer.h"
 #include <d3d11shader.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,88 @@ using Microsoft::WRL::ComPtr;
 namespace Bytecode=DarkRecomp::ShaderBytecodeCache;
 static void require(bool valid,const char* message) {if(!valid)throw std::runtime_error(message);}
 static void check(HRESULT result,const char* message) {if(FAILED(result))throw std::runtime_error(message);}
+static uint32_t bigWord(const uint8_t* bytes) {
+    return uint32_t(bytes[0])<<24|uint32_t(bytes[1])<<16|uint32_t(bytes[2])<<8|bytes[3];
+}
+static void putWord(uint8_t* bytes,uint32_t value) {
+    for(unsigned lane=0;lane<4;++lane)bytes[lane]=uint8_t(value>>(24-lane*8));
+}
+static void worldPrewarmContract(ID3D11Device* device,ID3D11DeviceContext* context) {
+    using namespace DarkRecomp::Native;
+    // Read the original records independently of the generated header. Every
+    // authored key must reach an actual submitted draw for each clipping form.
+    const auto sourceRoot=std::filesystem::path(__FILE__).parent_path().parent_path();
+    std::ifstream cache(sourceRoot/"Darkness/System/Xenon/ProgramCache.xpc",std::ios::binary);
+    require(bool(cache),"Original vertex cache fixture unavailable");
+    const std::vector<uint8_t> records((std::istreambuf_iterator<char>(cache)),{});
+    require(records.size()>=100 && bigWord(records.data()+96)==442,"Original vertex cache count changed");
+    std::vector<EngineVertexBindingSnapshot> bindings;
+    size_t offset=100;
+    for(unsigned record=0;record<442;++record) {
+        require(offset<=records.size() && records.size()-offset>=41,"Truncated original vertex record");
+        const size_t length=bigWord(records.data()+offset+37);
+        require(length<=records.size()-offset-41,"Truncated original vertex bytecode");
+        std::array<uint8_t,80> bytes{};
+        std::copy_n(records.data()+offset+17,20,bytes.data());
+        EngineVertexBindingSnapshot binding;
+        binding.descriptor=decodeEngineVertexDescriptor(bytes);
+        for(unsigned word=0;word<5;++word)binding.key[word+1]=bigWord(bytes.data()+word*4);
+        for(unsigned row=0;row<4;++row)
+            putWord(binding.constantBytes.data()+row*16+row*4,std::bit_cast<uint32_t>(1.0f));
+        putWord(binding.constantBytes.data()+8*16+4,std::bit_cast<uint32_t>(1.0f));
+        WorldVertexOptions prepared;WorldVertexConstants constants;
+        require(prepareWorldVertexProgram(binding,prepared,constants),"Authored descriptor failed live preparation");
+        require(prepared==worldVertexOptions(binding.descriptor),"Initialization and live descriptor decoding differ");
+        bindings.push_back(binding);offset+=41+length;
+    }
+    auto geometry=std::make_shared<StoredGeometry>();
+    geometry->vertexCount=3;geometry->formats.fill(4);geometry->stride=16*16;
+    geometry->vertices.resize(geometry->vertexCount*geometry->stride);geometry->indices={0,1,2};
+    const EngineVector positions[]{{-.75f,-.75f,.5f,1},{0,.75f,.5f,1},{.75f,-.75f,.5f,1}};
+    for(unsigned vertex=0;vertex<3;++vertex)for(unsigned slot=0;slot<16;++slot) {
+        EngineVector value{};
+        if(slot==0)value=positions[vertex];
+        else if(slot==9)value={0,0,1,0};
+        else if(slot==10)value={1,1,1,1};
+        else if(slot==13)value={1,0,0,0};
+        else if(slot==3)value={1,0,0,0};
+        else if(slot==4)value={0,1,0,0};
+        for(unsigned lane=0;lane<4;++lane)
+            putWord(geometry->vertices.data()+vertex*geometry->stride+slot*16+lane*4,std::bit_cast<uint32_t>(value[lane]));
+    }
+    context->ClearState();WorldRendererD3D11 renderer(device,context);
+    const auto shaders=renderer.vertexShaderCount(),compiles=renderer.vertexShaderCompileCount();
+    require(shaders==191*3,"Authored raster permutation count changed");
+    WorldClear clear;clear.targets={1,0,0,0,2};clear.viewport={0,0,32,32};clear.flags=49;
+    WorldDraw draw;draw.geometry.vertices=draw.geometry.indices=geometry;draw.geometry.indexCount=3;
+    draw.viewport=clear.viewport;draw.targets=clear.targets;draw.attributes[97]=8;
+    // This fixture checks depth coverage; unconfigured stencil state rejects all pixels.
+    putWord(draw.attributes.data()+92,6);draw.attributes[96]=8;
+    unsigned submitted=0;
+    for(size_t record=0;record<bindings.size();++record) {
+        require(prepareWorldVertexProgram(bindings[record],draw.options,draw.constants),"Authored draw preparation changed");
+        for(unsigned clip=0;clip<=2;++clip) {
+            draw.clipPlanes.control=clip==2?0x20001:clip;
+            draw.clipPlanes.planes[0]={0,0,0,1};
+            // Prove each raster form writes its own pixels, without retained depth.
+            if(record==0)renderer.clear(clear);
+            require(renderer.draw(draw),"Authored raster permutation was skipped");++submitted;
+            require(renderer.vertexShaderCount()==shaders && renderer.vertexShaderCompileCount()==compiles,
+                    "Authored first draw created or compiled a vertex shader");
+            if(record==0) {
+                const auto depth=renderer.readSurface(2,true);require(depth.size()==32*32*4,"Prewarmed draw depth extent changed");
+                uint32_t center=0;std::memcpy(&center,depth.data()+(16*32+16)*4,4);
+                require((center&0xFFFFFF)>=0x7FFFFF && (center&0xFFFFFF)<=0x800001,
+                        "Prewarmed unclipped/clipped/culled draw changed covered depth");
+            }
+        }
+    }
+    context->ClearState();
+    WorldRendererD3D11 warm(device,context);
+    require(warm.vertexShaderCount()==shaders && !warm.vertexShaderCompileCount(),
+            "Authored vertex shader bytecode failed persistence across renderer initialization");
+    std::printf("World shader prewarm passed: %u authored draws, zero first-use shader creation/compilation, clip/cull depth pixels and persistent warm cache.\n",submitted);
+}
 static void contract(ID3D11Device* device) {
     constexpr UINT flags=D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_WARNINGS_ARE_ERRORS|D3DCOMPILE_IEEE_STRICTNESS;
     constexpr std::string_view source=R"(
@@ -104,6 +187,7 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         check(D3D11CreateDevice(nullptr,warp?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context),"Create cache-contract device");
         contract(device.Get());
+        if(!benchmark)worldPrewarmContract(device.Get(),context.Get());
         if(benchmark)for(unsigned trial=0;trial<3;++trial) {
             const auto begin=std::chrono::steady_clock::now();
             {WorldRendererD3D11 renderer(device.Get(),context.Get());}

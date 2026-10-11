@@ -172,6 +172,10 @@ bool snapshotImmediateWorldGeometry(uint8_t* base,uint32_t descriptor,uint32_t i
                                     std::shared_ptr<const StoredGeometry> stored,StoredDraw&,
                                     ImmediateCaptureReason* reason=nullptr) noexcept;
 bool prepareWorldVertexProgram(const EngineVertexBindingSnapshot&, WorldVertexOptions&, WorldVertexConstants&) noexcept;
+// Shader identity only. Live preparation separately validates stages, inputs
+// and constant ranges before publishing a draw; initialization uses authored
+// descriptor keys without requiring a live engine constant bank.
+WorldVertexOptions worldVertexOptions(const EngineVertexDescriptor&) noexcept;
 // Failure-only geometry proof for a nonfinite palette tail. When the strict
 // full-palette copy above fails, this validates only the palette rows the
 // actual draw subset reads: address=floor(index*c8.w) for every active

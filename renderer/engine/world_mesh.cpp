@@ -602,6 +602,19 @@ bool snapshotImmediateWorldGeometry(uint8_t* base,uint32_t descriptor,uint32_t i
     }
 }
 
+WorldVertexOptions worldVertexOptions(const EngineVertexDescriptor& d) noexcept {
+    WorldVertexOptions o;
+    o.weights=(d.flags>>16)&15;
+    o.positionConversion=(d.flags&0x04000000)!=0; o.normal=(d.flags&0x00200000)!=0;
+    o.tangents=(d.flags&0x00400000)!=0; o.normalizeNormal=(d.flags&0x00800000)!=0;
+    o.vertexColor=(d.flags&0x01000000)==0;
+    for(unsigned s=0;s<8;++s) {
+        o.modes[s]=d.modes[s]; o.coordinates[s]=uint8_t((d.coordinateMapping>>(8+3*s))&7);
+        o.conversions[s]=(d.flags&(1u<<o.coordinates[s]))!=0; o.matrices[s]=(d.flags&(1u<<(8+s)))!=0;
+    }
+    return o;
+}
+
 // Internal callers own a fresh, unpublished result, so fill it directly.
 // The public wrapper below still leaves caller output unchanged on failure.
 static bool prepareWorldVertexProgramInto(const EngineVertexBindingSnapshot& b, WorldVertexOptions& o,
@@ -616,11 +629,8 @@ static bool prepareWorldVertexProgramInto(const EngineVertexBindingSnapshot& b, 
     };
     const auto mismatch=worldDescriptorKeyMismatch(b);
     if(mismatch<5)return reject("descriptor-key",mismatch,1);
-    o.weights=(d.flags>>16)&15;
+    o=worldVertexOptions(d);
     if (o.weights>8) return reject("weight-count",o.weights,0);
-    o.positionConversion=(d.flags&0x04000000)!=0; o.normal=(d.flags&0x00200000)!=0;
-    o.tangents=(d.flags&0x00400000)!=0; o.normalizeNormal=(d.flags&0x00800000)!=0;
-    o.vertexColor=(d.flags&0x01000000)==0;
     c.references[0]={d.palette,d.positionConversion,d.color,0};
     auto take=[&](unsigned first,unsigned count) {
         if (first>=256 || count>256-first) return reject("constant-range",first,count);
@@ -667,8 +677,6 @@ static bool prepareWorldVertexProgramInto(const EngineVertexBindingSnapshot& b, 
         // modes have no parameter rows and require the original input flags.
         if ((d.modes[s]==11 && !o.normal) || ((d.modes[s]==23 || d.modes[s]==24) && !o.tangents))
             return reject("water-basis-input",s,d.modes[s]);
-        o.modes[s]=d.modes[s]; o.coordinates[s]=uint8_t((d.coordinateMapping>>(8+3*s))&7);
-        o.conversions[s]=(d.flags&(1u<<o.coordinates[s]))!=0; o.matrices[s]=(d.flags&(1u<<(8+s)))!=0;
         c.references[s+1]={d.conversions[s],d.matrices[s],d.parameters[s][0],0};
         // Mode 7 is the original shadowvolume2 position extrusion. Its scalar
         // selector consumes a vertex coordinate and optional conversion pair,

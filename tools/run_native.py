@@ -32,7 +32,9 @@ parser.add_argument("--test-start", action="store_true", help="Integration test:
 parser.add_argument("--test-skip-intros", action="store_true", help="Integration test: send bounded Space pulses until the world begins")
 parser.add_argument("--test-input", type=Path, help="Integration test: read up to 64 keyboard commands from this file "
                     "(numeric '<key> [<holdMs 1..10000>]'; bare menu keys hold 250ms, I/J/K/L hold 2000ms; "
-                    "'mouse <dx> <dy>'; 'capture'; '0' inspects; an invalid line blocks later commands until fixed)")
+                    "'mouse <dx> <dy>'; 'capture'; '0' inspects; an invalid line blocks later commands until fixed). "
+                    "Newline completes a command; maximum file size 256KiB. Background polling and stable snapshots "
+                    "take about 500ms, plus up to 250ms before display dispatch.")
 args = parser.parse_args()
 if not 100 <= args.timeout_ms <= 1800000:
     parser.error("--timeout-ms must be between 100 and 1800000")

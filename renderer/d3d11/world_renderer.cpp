@@ -150,6 +150,7 @@ VertexOutput rasterMain(VertexInput input) {
         const auto hr=D3DCompile(source.data(),source.size(),"original_world_VP",macros.data(),nullptr,
             entry,"vs_5_0",flags,0,&code_,&errors);
         if (FAILED(hr)) throw std::runtime_error(errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"World vertex compilation failed");
+        compiled_=true;
         const double compileMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-compileStart).count();
         static std::atomic<unsigned> slowCompiles{};
         if(compileMs>8.0 && slowCompiles.fetch_add(1,std::memory_order_relaxed)<16)
@@ -239,6 +240,28 @@ WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,ui
         imageBudget_=std::clamp(size_t(desc.DedicatedVideoMemory/4),size_t(256*1024*1024),size_t(2ull*1024*1024*1024));
     MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
     if(GlobalMemoryStatusEx(&memory))imageBudget_=(std::min)(imageBudget_,(std::max)(size_t(256*1024*1024),size_t(memory.ullAvailPhys/4)));
+    // The original cache enumerates actual engine programs, rather than the
+    // template's combinatorial option space. Prepare their native raster
+    // forms before the guest starts, just like the fragment programs below.
+    // Keep the same shader objects for the first draw: no compile, cache I/O
+    // or device shader/layout/buffer creation is needed on that display frame.
+    const auto verticesStart=std::chrono::steady_clock::now();
+    shaders_.reserve(engineWorldVertexDescriptorKeys.size()*3);
+    for(const auto& descriptorKey:engineWorldVertexDescriptorKeys) {
+        std::array<uint8_t,80> descriptorBytes{};
+        std::copy(descriptorKey.begin(),descriptorKey.end(),descriptorBytes.begin());
+        const auto options=Native::worldVertexOptions(Native::decodeEngineVertexDescriptor(descriptorBytes));
+        for(unsigned userClip=0;userClip<=2;++userClip) {
+            const auto key=shaderKey(options,userClip);
+            auto& shader=cacheEntry(shaders_,std::string_view(key.data(),key.size()));
+            if(shader)continue;
+            shader=std::make_unique<WorldVertexShaderD3D11>(device_.Get(),options,true,userClip);
+            vertexShaderCompileCount_+=shader->compiled();
+        }
+    }
+    std::fprintf(stderr,"[RenderShaderCache] worldVS=%zu hits=%llu misses=%llu initMs=%.2f compiler=%016llX\n",
+        shaders_.size(),uint64_t(shaders_.size())-vertexShaderCompileCount_,vertexShaderCompileCount_,
+        millisBetween(verticesStart,std::chrono::steady_clock::now()),ShaderBytecodeCache::compilerIdentity().value_or(0));
     unsigned fragmentCacheHits=0,fragmentCacheMisses=0;
     const auto fragmentsStart=std::chrono::steady_clock::now();
     auto compile=[&](const char* source,const char* name,Ptr<ID3D11PixelShader>& shader) {
@@ -1791,7 +1814,10 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
         shaderPtr = lastShader_;
     } else {
         const auto key=shaderKey(draw.options,userClip);auto& shader=cacheEntry(shaders_,std::string_view(key.data(),key.size()));
-        if (!shader) shader=std::make_unique<WorldVertexShaderD3D11>(device_.Get(),draw.options,true,userClip);
+        if (!shader) {
+            shader=std::make_unique<WorldVertexShaderD3D11>(device_.Get(),draw.options,true,userClip);
+            vertexShaderCompileCount_+=shader->compiled();
+        }
         shaderPtr = shader.get();
         lastShaderOptions_ = draw.options; lastShaderUserClip_ = userClip;
         lastShader_ = shaderPtr; lastShaderValid_ = true;
