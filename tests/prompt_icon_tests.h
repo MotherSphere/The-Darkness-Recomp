@@ -250,12 +250,109 @@ static void testQueuedPromptContexts() {
     require(queuedPromptContext(baseA, managerA, overflowDraw) == menu,
             "Allocation invalidation retained the final queued context");
 }
+static void testPromptCacheRetention() {
+    using namespace DarkRecomp;
+    using namespace DarkRecomp::Native;
+    using namespace DarkRecomp::Prompts;
+    constexpr uint32_t promptId = 60000, resource = 0x600000;
+    constexpr uint32_t ordinaryFirst = 60100, ordinaryCount = 17;
+    struct FixtureCleanup {
+        ~FixtureCleanup() {
+            previewPrepareTexture(promptId);
+            for (unsigned i = 0; i < ordinaryCount; ++i) previewPrepareTexture(ordinaryFirst + i);
+        }
+    } cleanup;
+    enableEnginePreview();
+    setPreviewTextureBudget(256ull * 1024 * 1024);
+    auto original = std::make_shared<ColorImage>(promptTestImage(200, 40, 40, 32, 32,
+        uint8_t(originFromName("GUI_Button_Back"))));
+    original->authoredMips = true;
+    require(original->valid(), "Authored Back prompt cache fixture is invalid");
+    const auto originalPixels = original->pixels;
+    previewPublishTexture(promptId, resource, original);
+    const auto queuedImage = previewCapturedTexture(promptId, resource);
+    require(queuedImage == original, "Prompt cache did not capture the original image generation");
+    const auto keyboard = promptReplacementFor(promptId, queuedImage,
+        PromptRenderSource::KeyboardMouse, PromptRenderContext::Gameplay);
+    const auto tab = makeKeycap("Tab");
+    require(keyboard && keyboard->width == tab.width && keyboard->height == tab.height,
+        "Back prompt did not select a full Tab keycap");
+    for (size_t i = 0; i < tab.pixels.size(); i += 4) {
+        require(keyboard->pixels[i + 3] == tab.pixels[i + 3], "Back keycap alpha differs from Tab artwork");
+        if (tab.pixels[i + 3])
+            require(std::equal(tab.pixels.begin() + i, tab.pixels.begin() + i + 4,
+                keyboard->pixels.begin() + i), "Back keycap pixels differ from Tab artwork");
+    }
+    requirePromptMipChain(*keyboard);
+    // Cache accounting charges each ID even when fixtures share the pixel
+    // allocation. Seventeen 16 MiB entries exceed the 256 MiB budget while
+    // the oldest Back image has not been used again since publication.
+    auto ordinary = std::make_shared<ColorImage>();
+    ordinary->width = ordinary->height = 2048;
+    ordinary->authoredMips = true;
+    ordinary->pixels.resize(2048ull * 2048 * 4, 0);
+    for (unsigned i = 0; i < ordinaryCount; ++i)
+        previewPublishTexture(ordinaryFirst + i, resource + 0x100 + i, ordinary);
+    const auto retained = previewCapturedTexture(promptId, resource);
+    require(retained == original && retained->promptOrigin == uint8_t(Origin::Back),
+        "World-loading cache pressure evicted the verified Back prompt origin");
+    // Retaining Back leaves room for fifteen ordinary entries; both oldest
+    // ordinary entries must be evicted rather than exceeding the byte budget.
+    for (unsigned i = 0; i < ordinaryCount; ++i)
+        require(previewCapturedTexture(ordinaryFirst + i, resource + 0x100 + i) ==
+            (i < 2 ? nullptr : ordinary), "Prompt retention broke ordinary LRU eviction or cache budget");
+    require(promptReplacementFor(promptId, retained, PromptRenderSource::KeyboardMouse,
+        PromptRenderContext::Gameplay) == keyboard, "Retained Back prompt lost its Tab keycap");
+    require(!promptReplacementFor(promptId, retained, PromptRenderSource::Controller,
+        PromptRenderContext::Gameplay), "Prompt retention replaced original controller artwork");
+    require(promptReplacementFor(promptId, retained, PromptRenderSource::KeyboardMouse,
+        PromptRenderContext::Gameplay) == keyboard, "Prompt retention broke reversible source switching");
+
+    auto unknown = std::make_shared<ColorImage>(promptTestImage(40, 40, 200));
+    unknown->authoredMips = true;
+    previewPublishTexture(promptId, resource, unknown);
+    require(previewCapturedTexture(promptId, resource) == unknown && !unknown->promptOrigin &&
+        !promptReplacementFor(promptId, unknown, PromptRenderSource::KeyboardMouse,
+            PromptRenderContext::Gameplay), "Same-ID unknown replacement inherited a retained prompt origin");
+    previewPublishTexture(promptId, resource, original);
+    previewPrepareTexture(promptId);
+    require(!previewCapturedTexture(promptId, resource), "Explicit preparation failed to invalidate retained prompt");
+    previewPublishTexture(promptId, resource, unknown);
+    require(previewCapturedTexture(promptId, resource) == unknown &&
+        !promptReplacementFor(promptId, unknown, PromptRenderSource::KeyboardMouse,
+            PromptRenderContext::Gameplay), "Invalidated prompt ID resurrected a stale origin");
+    require(queuedImage == original && queuedImage->promptOrigin == uint8_t(Origin::Back) &&
+        queuedImage->pixels == originalPixels &&
+        promptReplacementFor(promptId, queuedImage, PromptRenderSource::KeyboardMouse,
+            PromptRenderContext::Gameplay) == keyboard,
+        "Cache replacement or invalidation mutated an already owned prompt generation");
+
+    previewPrepareTexture(promptId);
+    for (unsigned i = 0; i < ordinaryCount; ++i) previewPrepareTexture(ordinaryFirst + i);
+    auto protectedImage = std::make_shared<ColorImage>(*ordinary);
+    protectedImage->promptOrigin = uint8_t(Origin::Back);
+    // Publish a separate immutable generation: the ordinary image above was
+    // already owned by cache entries and must never gain a prompt tag later.
+    const std::shared_ptr<const ColorImage> protectedPressure = std::move(protectedImage);
+    ordinary.reset();
+    for (unsigned i = 0; i < 16; ++i)
+        previewPublishTexture(ordinaryFirst + i, resource + 0x100 + i, protectedPressure);
+    previewPublishTexture(promptId, resource, unknown);
+    require(!previewCapturedTexture(promptId, resource),
+        "All-retained cache accepted an ordinary image beyond its 256 MiB budget");
+    for (unsigned i = 0; i < 16; ++i)
+        require(previewCapturedTexture(ordinaryFirst + i, resource + 0x100 + i) == protectedPressure,
+            "All-retained cache evicted a protected generation when no eligible victim existed");
+    std::puts("PromptCacheRetention passed: Back/Tab survives 256 MiB pressure, ordinary LRU stays bounded, a full retained cache rejects overflow, sources switch and invalidation preserves owned generations.");
+}
+
 static void testPromptIcons() {
     using namespace DarkRecomp::Prompts;
     testPromptRenderContext();
     testQueuedPromptContexts();
     testPromptLayout();
     setBindingLabels(defaultBindingLabels(), defaultGameplayBindingLabels());
+    testPromptCacheRetention();
     require(originFromName("GUI_Button_A") == Origin::A, "XTC A did not classify");
     require(originFromName("GUI_Button_DRL") == Origin::DRL, "Paired DRL lost");
     require(originFromName("GUI_Button_DUD") == Origin::DUD, "Paired DUD lost");
