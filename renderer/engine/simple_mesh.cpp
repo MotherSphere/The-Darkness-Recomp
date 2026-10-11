@@ -99,6 +99,25 @@ PreviewTexturePreloadCounters texturePreloadCounts;
 size_t colorBudget = 256 * 1024 * 1024;
 size_t colorBytes = 0, pendingColorBytes = 0;
 uint64_t colorUse = 0;
+// Called with queueMutex held. Ordinary textures can be reconstructed from
+// resident guest pixels after eviction; verified GUI prompts also carry the
+// selected original button name, which a pixel-only decode cannot recover.
+// Retain that owned generation until explicit invalidation or replacement.
+bool makeColorCacheRoom(size_t bytes) {
+    if (bytes > colorBudget) return false;
+    while (colorBytes > colorBudget - bytes) {
+        auto oldest = colorTextures.end();
+        for (auto it = colorTextures.begin(); it != colorTextures.end(); ++it) {
+            if (it->second.image->promptOrigin) continue;
+            if (oldest == colorTextures.end() || it->second.used < oldest->second.used) oldest = it;
+        }
+        // Keep the cache bounded even if retained prompts fill its budget.
+        if (oldest == colorTextures.end()) return false;
+        colorBytes -= oldest->second.image->bytes();
+        colorTextures.erase(oldest);
+    }
+    return true;
+}
 struct CachedVideo {
     uint32_t owner = 0, frame = 0;
     std::array<uint8_t, 8> timestamp{};
@@ -694,10 +713,7 @@ void previewPublishTexture(uint32_t id,uint32_t resource,std::shared_ptr<const C
     std::lock_guard lock(queueMutex);
     if(image->bytes()>colorBudget)return;
     if(auto it=colorTextures.find(id);it!=colorTextures.end()) {colorBytes-=it->second.image->bytes();colorTextures.erase(it);}
-    while(colorBytes+image->bytes()>colorBudget && !colorTextures.empty()) {
-        auto oldest=std::min_element(colorTextures.begin(),colorTextures.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
-        colorBytes-=oldest->second.image->bytes();colorTextures.erase(oldest);
-    }
+    if (!makeColorCacheRoom(image->bytes())) return;
     colorBytes+=image->bytes();colorTextures[id]={image,++colorUse,resource};++colorImages;
     if(image->authoredMips && !image->firstMip) {
         if(texturePreloads.size()==texturePreloadLimit) {
@@ -812,11 +828,7 @@ void previewObserveImage(uint8_t* base, uint32_t address, uint32_t id, uint32_t 
         if (auto it = colorTextures.find(id); it != colorTextures.end()) {
             colorBytes -= it->second.image->bytes(); colorTextures.erase(it);
         }
-        while (colorBytes + color->bytes() > colorBudget && !colorTextures.empty()) {
-            auto oldest = std::min_element(colorTextures.begin(), colorTextures.end(),
-                [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
-            colorBytes -= oldest->second.image->bytes(); colorTextures.erase(oldest);
-        }
+        if (!makeColorCacheRoom(color->bytes())) { ++rejectedImages; return; }
         colorBytes += color->bytes(); colorTextures[id] = {color, ++colorUse}; ++colorImages;
         if (TextureUploadTraceEnabled())
             std::printf("[EnginePreview] Copied original color texture id=%u size=%ux%u codec=%u\n",
@@ -1122,11 +1134,9 @@ void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
                         if(auto old=colorTextures.find(draw->textureIds[s]);old!=colorTextures.end()) {
                             colorBytes-=old->second.image->bytes();colorTextures.erase(old);
                         }
-                        while(colorBytes+decoded->bytes()>colorBudget && !colorTextures.empty()) {
-                            auto oldest=std::min_element(colorTextures.begin(),colorTextures.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
-                            colorBytes-=oldest->second.image->bytes();colorTextures.erase(oldest);
+                        if (makeColorCacheRoom(decoded->bytes())) {
+                            colorBytes+=decoded->bytes();colorTextures[draw->textureIds[s]]={decoded,++colorUse,draw->textureObjects[s].object};
                         }
-                        colorBytes+=decoded->bytes();colorTextures[draw->textureIds[s]]={decoded,++colorUse,draw->textureObjects[s].object};
                         draw->textures[s]=decoded;++colorImages;
                         if (TextureUploadTraceEnabled())
                             std::fprintf(stderr,"[EngineStreamedTexture] owned id=%u size=%ux%u format=%u\n",draw->textureIds[s],decoded->width,decoded->height,draw->textureObjects[s].format);
