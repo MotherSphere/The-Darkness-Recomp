@@ -8,6 +8,7 @@ static void testWorldSourceRecovery(Memory& memory,const StoredDraw& world,uint3
                                     uint32_t program,uint32_t name,BindTexture bind,FinishFrame finish) {
     auto* base=memory.base();
     constexpr uint32_t context=0x82A69B00,attributes=context+16896;
+    constexpr unsigned pressureFirst=0x790,pressureCount=17;
     const auto oldTable=memory.read32(context+17964);
     std::array<uint8_t,160> oldAttributes{};
     std::memcpy(oldAttributes.data(),base+attributes,oldAttributes.size());
@@ -22,6 +23,8 @@ static void testWorldSourceRecovery(Memory& memory,const StoredDraw& world,uint3
             std::memcpy(base+attributes,savedAttributes.data(),savedAttributes.size());
             put32(base,context+17964,table);
             for(unsigned id=0x780;id<0x788;++id)previewPrepareTexture(id);
+            for(unsigned i=0;i<pressureCount;++i)previewPrepareTexture(pressureFirst+i);
+            setPreviewTextureBudget(256ull*1024*1024);
             memory.release(scratch);memory.release(storage);
         }
     } restore{memory,base,scratch,storage,device,oldTable,oldDevice,oldAttributes};
@@ -54,15 +57,20 @@ static void testWorldSourceRecovery(Memory& memory,const StoredDraw& world,uint3
             bind(slot,objects[slot]);previewPrepareTexture(id);
         }
     };
-    auto capture=[&](const char* fragment,unsigned flags,uint16_t allowed) {
+    auto queue=[&](const char* fragment,unsigned flags,bool cold) {
         std::strcpy(reinterpret_cast<char*>(base+name),fragment);put32(base,program+16,flags<<8);
-        for(unsigned id=0x780;id<0x788;++id)previewPrepareTexture(id);
+        if(cold)for(unsigned id=0x780;id<0x788;++id)previewPrepareTexture(id);
         previewObserveWorld(base,world);const auto commands=finish();
         require(commands.size()==1 && commands[0].world && commands[0].world->fragmentName==fragment &&
                 commands[0].world->fragmentFlags==flags,"World source pass was lost during queue capture");
         const auto draw=commands[0].world;
         const auto mask=worldFragmentTextureMask(fragment,flags);
         require(mask!=0xFFFF && draw->textureMask==mask,"World source fixture did not use a compiled original pass");
+        return draw;
+    };
+    auto capture=[&](const char* fragment,unsigned flags,uint16_t allowed) {
+        const auto draw=queue(fragment,flags,true);
+        const auto mask=draw->textureMask;
         for(unsigned slot=0;slot<8;++slot) {
             const bool used=(mask&(1u<<slot))!=0,recover=used && (allowed&(1u<<slot));
             require(bool(draw->textures[slot])==recover,
@@ -89,5 +97,81 @@ static void testWorldSourceRecovery(Memory& memory,const StoredDraw& world,uint3
     capture("WModel_FXHeatHazeMask",0,6);++passes;
     capture("WModel_FXBlackHole",0,6);++passes;
     capture("GUIRGB2Grey",0,1);++passes;
-    std::printf("WorldSourceRecovery: %u water/fog/FX/GUI passes retain authored sources and exclude GPU depth/scene inputs.\n",passes);
+
+    setup(false);
+    auto voice=[&](bool cold) {return queue("XREngine_RadialBlurInvert",0,cold);};
+    auto verifyVoice=[&](const auto& draw,uint16_t authoredMask) {
+        require(draw->textureMask==0x0f,"Voice fixture did not retain scene/mask/noise bindings");
+        require(draw->textureObjects[0].object==objects[0] && draw->textureIds[0]==0x780 && !draw->textures[0],
+                "Voice recovery decoded readable CPU storage for its GPU scene input");
+        for(unsigned slot=1;slot<4;++slot) {
+            require(draw->textureObjects[slot].object==objects[slot] && draw->textureIds[slot]==0x780+slot,
+                    "Voice source recovery changed a completed original binding");
+            const bool authored=(authoredMask&(1u<<slot))!=0;
+            require(bool(draw->textures[slot])==authored,"Voice source recovery omitted or revived an authored input");
+            if(authored)require(draw->textures[slot]->valid() && draw->textures[slot]->authoredMips &&
+                    draw->textures[slot]->width==4 && draw->textures[slot]->height==4 &&
+                    draw->textures[slot]->pixels==expected[slot],
+                    "Voice source recovery changed the nonuniform authored pixels");
+        }
+        for(unsigned slot=4;slot<draw->textures.size();++slot)
+            require(!draw->textures[slot],"Voice recovery decoded an unused texture slot");
+    };
+    // Start with completed uploads so the first regression assertion exercises
+    // a working draw, a real budget trim, then unchanged original bindings.
+    setPreviewTextureBudget(320ull*1024*1024);
+    for(unsigned slot=1;slot<4;++slot) {
+        auto image=std::make_shared<ColorImage>();
+        require(!decodeWorldTextureImage(base,objects[slot],*image),"Voice upload fixture could not decode authored pixels");
+        previewPublishTexture(0x780+slot,objects[slot],std::move(image));
+    }
+    const auto owned=voice(false);verifyVoice(owned,0x0e);++passes;
+    auto pressure=std::make_shared<ColorImage>();pressure->width=pressure->height=2048;
+    pressure->pixels.resize(2048ull*2048*4,37);
+    for(unsigned i=0;i<pressureCount;++i)previewPublishTexture(pressureFirst+i,scratch+i+1,pressure);
+    for(unsigned i=0;i<pressureCount;++i)
+        require(previewCapturedTexture(pressureFirst+i,scratch+i+1)==pressure,"Voice pressure fixture did not fit the grown budget");
+    for(unsigned slot=1;slot<4;++slot)
+        require(previewCapturedTexture(0x780+slot,objects[slot])==owned->textures[slot],
+                "Voice pressure evicted a source before the budget shrink");
+    setPreviewTextureBudget(256ull*1024*1024);
+    for(unsigned slot=1;slot<4;++slot)
+        require(!previewCapturedTexture(0x780+slot,objects[slot]),"Voice budget shrink did not evict the older authored sources");
+    const auto recovered=voice(false);++passes;
+    require(recovered->textures[1] && recovered->textures[2] && recovered->textures[3],
+            "Voice masks/noise did not recover after decoded-cache budget shrink");
+    verifyVoice(recovered,0x0e);verifyVoice(owned,0x0e);
+    for(unsigned slot=1;slot<4;++slot) {
+        require(recovered->textures[slot]!=owned->textures[slot] &&
+                previewCapturedTexture(0x780+slot,objects[slot])==recovered->textures[slot],
+                "Voice recapture reused an evicted generation or failed to cache the reconstructed source");
+    }
+    for(unsigned i=0;i<pressureCount;++i)previewPrepareTexture(pressureFirst+i);
+    pressure.reset();
+
+    const auto cold=voice(true);verifyVoice(cold,0x0e);verifyVoice(owned,0x0e);++passes;
+    // A valid binding with an unsupported encoding must not publish a partial
+    // decode or borrow the noise image from an earlier completed draw.
+    const auto noiseFetch=memory.read32(objects[3]+32);
+    put32(base,objects[3]+32,(noiseFetch&~63u)|63u);bind(3,objects[3]);previewPrepareTexture(0x783);
+    ColorImage invalid;
+    require(decodeWorldTextureImage(base,objects[3],invalid)!=nullptr,"Invalid voice-noise encoding unexpectedly decoded");
+    const auto failed=voice(false);verifyVoice(failed,0x06);++passes;
+    require(!previewCapturedTexture(0x783,objects[3]),"Failed voice-noise decode entered the CPU cache");
+    verifyVoice(cold,0x0e);
+    put32(base,objects[3]+32,noiseFetch);bind(3,objects[3]);
+    const auto repaired=voice(false);verifyVoice(repaired,0x0e);++passes;
+
+    // Death can leave the old IDs and fetch words behind while explicitly
+    // unbinding the mask/noise objects. Cached pixels must remain unavailable.
+    for(unsigned slot=1;slot<4;++slot)bind(slot,0);
+    const auto death=voice(false);++passes;
+    require(death->textureMask==0x0f && death->textureObjects[0].object==objects[0] && !death->textures[0],
+            "Unbound voice pass changed or recovered its GPU scene input");
+    for(unsigned slot=1;slot<4;++slot)
+        require(death->textureIds[slot]==0x780+slot && !death->textureObjects[slot].object && !death->textures[slot] &&
+                previewCapturedTexture(0x780+slot,objects[slot])==repaired->textures[slot],
+                "Unbound death masks revived cached images or discarded their owned generation");
+    verifyVoice(repaired,0x0e);verifyVoice(owned,0x0e);
+    std::printf("WorldSourceRecovery: %u water/fog/FX/GUI/voice passes retain authored pixels, recover after budget trim, and exclude GPU scene or unbound inputs.\n",passes);
 }

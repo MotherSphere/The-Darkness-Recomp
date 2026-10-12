@@ -1126,6 +1126,9 @@ static void previewObserveWorldInto(uint8_t* base,Geometry&& geometry) {
                    (draw->fragmentName=="WModel_FXRenderSurface" && s==1) ||
                    ((draw->fragmentName=="WModel_FXHeatHazeMask" || draw->fragmentName=="WModel_FXBlackHole") &&
                     (s==1 || s==2)) ||
+                   // Darkness voice masks/noise are authored CPU images.
+                   // Its scene input at slot0 remains a GPU resolve.
+                   (draw->fragmentName=="XREngine_RadialBlurInvert" && s>=1 && s<=3) ||
                    // CCFuser texture1 is its original 324x18 RGB lookup map.
                    // Reload the source pixels if its CPU cache entry expired.
                    (draw->fragmentName=="XREngine_CCFuser" && s==1) ||
