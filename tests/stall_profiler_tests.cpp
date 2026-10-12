@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     HANDLE gate = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE pacing = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::string liveRenderObject, liveAudioObject;
     check(gate && started && pacing, "create original wait objects");
     if (gate && started && pacing) {
         Scope display(Section::Other, "test_display");
@@ -108,6 +109,78 @@ int main(int argc, char** argv) {
             frameBoundary("accounting");
         });
         accounting.join();
+
+        // Keep a worker changing its active leaf and totals while another
+        // thread snapshots it. Every successful snapshot must retain a whole
+        // metadata tuple even across many nested scope transitions.
+        std::atomic<bool> stormReady{false}, stormDone{false};
+        uint64_t stormScopes = 0;
+        std::thread storm([&] {
+            Scope guest(Section::Guest, "snapshot_storm_guest", 0x8200C000, 0x8200C100);
+            stormReady.store(true, std::memory_order_release);
+            while (!stormDone.load(std::memory_order_acquire)) {
+                Scope render(Section::Rendering, "snapshot_storm_render", 0x8200C200, 0x8200C300);
+                { Scope audio(Section::Audio, "snapshot_storm_audio", 0x8200C400, 0x8200C500); }
+                ++stormScopes;
+            }
+        });
+        while (!stormReady.load(std::memory_order_acquire)) WaitForSingleObject(pacing, 1);
+        frameBoundary("snapshot_storm_setup");
+        for (unsigned i = 0; i < 12; ++i) {
+            WaitForSingleObject(pacing, 25);
+            frameBoundary("snapshot_storm");
+        }
+        stormDone.store(true, std::memory_order_release);
+        storm.join();
+        check(stormScopes != 0, "concurrent nested scope storm makes progress");
+
+        // Fast transitions rarely leave an active leaf older than the 2ms
+        // contributor threshold. Pre-age each reader frame, then hold a live
+        // worker leaf for only 4ms and snapshot it before allowing its Scope
+        // to complete. A pending contributor must therefore come from the
+        // cross-thread snapshot, never a completed-call event.
+        const auto liveSnapshot = [&](Section section, const char* function,
+                                      const char* stream, uint32_t pc, uint32_t caller,
+                                      const char* objectKind, std::string& objectTag) {
+            HANDLE start = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            HANDLE release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            check(start && ready && release, "create controlled snapshot handshake");
+            if (start && ready && release) {
+                char tag[128]{};
+                std::snprintf(tag, sizeof(tag), "object_kind=%s object=0x%llX ",
+                    objectKind, reinterpret_cast<uint64_t>(release));
+                objectTag = tag;
+                bool workerWaitsOk = false;
+                std::thread worker([&] {
+                    if (WaitForSingleObject(start, 1000) != WAIT_OBJECT_0) return;
+                    Scope guest(Section::Guest, "snapshot_live_guest", 0x8200D000, 0x8200D100);
+                    Scope leaf(section, function, pc, caller,
+                        reinterpret_cast<uint64_t>(release), objectKind);
+                    SetEvent(ready);
+                    workerWaitsOk = WaitForSingleObject(release, 1000) == WAIT_OBJECT_0;
+                });
+                frameBoundary("snapshot_live_setup");
+                for (unsigned i = 0; i < 5; ++i) WaitForSingleObject(pacing, 4);
+                SetEvent(start);
+                const auto readyResult = WaitForSingleObject(ready, 1000);
+                check(readyResult == WAIT_OBJECT_0, "controlled live leaf published before snapshot");
+                if (readyResult == WAIT_OBJECT_0) {
+                    WaitForSingleObject(pacing, 4);
+                    frameBoundary(stream);
+                }
+                SetEvent(release);
+                worker.join();
+                check(workerWaitsOk, "controlled live leaf completes after reader snapshot");
+            }
+            if (start) CloseHandle(start);
+            if (ready) CloseHandle(ready);
+            if (release) CloseHandle(release);
+        };
+        liveSnapshot(Section::Rendering, "snapshot_live_render", "snapshot_live_render",
+            0x8200D200, 0x8200D300, "snapshot_render_event", liveRenderObject);
+        liveSnapshot(Section::Audio, "snapshot_live_audio", "snapshot_live_audio",
+            0x8200D400, 0x8200D500, "snapshot_audio_event", liveAudioObject);
 
         // The parent earns its self time in the preceding frame. Only its
         // nested wait occupies the target frame; its full lifetime/self time
@@ -220,6 +293,46 @@ int main(int argc, char** argv) {
               std::fabs(number(accountingTotals, " audio=") - number(audioCall, " self_ms=")) < 0.25 &&
               std::fabs(number(accountingTotals, " present=") - number(presentCall, " self_ms=")) < 0.25,
               "nested sections retain their own exclusive wall time");
+
+        check(!findLine(log, "stream=snapshot_storm ", "total_ms=").empty(),
+              "concurrent scope storm sampled across slow frames");
+        check(!findLine(log, "[STALL] call", "function=snapshot_storm_guest ").empty(),
+              "concurrent scope storm retains completed outer call");
+        size_t stormBegin = 0;
+        while (stormBegin < log.size()) {
+            const auto end = log.find('\n', stormBegin);
+            const auto line = log.substr(stormBegin, end == std::string::npos ? end : end - stormBegin);
+            if (line.find("function=snapshot_storm_guest ") != std::string::npos)
+                check(line.find("guest_pc=0x8200C000 caller=0x8200C100") != std::string::npos &&
+                      line.find("section=guest ") != std::string::npos, "guest storm snapshot metadata coherent");
+            if (line.find("function=snapshot_storm_render ") != std::string::npos)
+                check(line.find("guest_pc=0x8200C200 caller=0x8200C300") != std::string::npos &&
+                      line.find("section=rendering ") != std::string::npos, "render storm snapshot metadata coherent");
+            if (line.find("function=snapshot_storm_audio ") != std::string::npos)
+                check(line.find("guest_pc=0x8200C400 caller=0x8200C500") != std::string::npos &&
+                      line.find("section=audio ") != std::string::npos, "audio storm snapshot metadata coherent");
+            if (end == std::string::npos) break;
+            stormBegin = end + 1;
+        }
+
+        const auto liveRender = findLine(log, "[STALL] contributor ", "function=snapshot_live_render ");
+        const auto liveAudio = findLine(log, "[STALL] contributor ", "function=snapshot_live_audio ");
+        check(!liveRender.empty() && !liveAudio.empty(),
+              "controlled render and audio reader snapshots both produce contributors");
+        check(liveRender.find("guest_pc=0x8200D200 caller=0x8200D300") != std::string::npos &&
+              liveRender.find("section=rendering ") != std::string::npos &&
+              !liveRenderObject.empty() && liveRender.find(liveRenderObject) != std::string::npos &&
+              liveRender.find("pending=1 ") != std::string::npos &&
+              liveRender.find("stream=snapshot_live_render contributor_group=workers ") != std::string::npos &&
+              number(liveRender, " overlap_ms=") > 2,
+              "live render reader snapshot retains the complete pending metadata tuple");
+        check(liveAudio.find("guest_pc=0x8200D400 caller=0x8200D500") != std::string::npos &&
+              liveAudio.find("section=audio ") != std::string::npos &&
+              !liveAudioObject.empty() && liveAudio.find(liveAudioObject) != std::string::npos &&
+              liveAudio.find("pending=1 ") != std::string::npos &&
+              liveAudio.find("stream=snapshot_live_audio contributor_group=workers ") != std::string::npos &&
+              number(liveAudio, " overlap_ms=") > 2,
+              "live audio reader snapshot retains the complete pending metadata tuple");
 
         const auto targetFrame = findLine(log, "stream=cross_frame_target ", "total_ms=");
         const auto targetTotals = findLine(log, "stream=cross_frame_target ", "contributors=frame_thread");

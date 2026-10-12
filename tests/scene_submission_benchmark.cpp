@@ -10,6 +10,7 @@
 #include <atomic>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 using namespace DarkRecomp::Native;
 using Clock=std::chrono::steady_clock;
@@ -201,7 +202,7 @@ int main(int argc,char** argv) {
                     const auto id=1+((i+frameIndex)*13)%workingSet;
                     auto draw=cache.draw(base,id,id,0,3,resources+id*128+56);
                     draw.vertexBindings=binding;
-                    previewObserveWorld(base,draw);
+                    previewObserveWorld(base,std::move(draw));
                 }
                 previewEndFrame();
                 if(consumer.active())consumer.finishFrame();

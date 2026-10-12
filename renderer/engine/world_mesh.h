@@ -202,6 +202,8 @@ bool prepareWorldVertexProgramWithGeometry(const EngineVertexBindingSnapshot&, c
 bool snapshotWorldDraw(uint8_t* base, const StoredDraw&, WorldDraw&) noexcept;
 // Populate the final owned allocation directly and publish only after success.
 std::shared_ptr<WorldDraw> captureWorldDraw(uint8_t* base,const StoredDraw&) noexcept;
+// Consume only the geometry references, and only after successful capture.
+std::shared_ptr<WorldDraw> captureWorldDraw(uint8_t* base,StoredDraw&&) noexcept;
 bool snapshotWorldClear(uint8_t* base,uint32_t device,uint32_t flags,uint32_t color,
                         float depth,uint32_t stencil,WorldClear&) noexcept;
 void printWorldCounters();

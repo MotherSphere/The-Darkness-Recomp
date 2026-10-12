@@ -29,6 +29,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace DarkRecomp::Native {
 namespace {
@@ -97,6 +98,7 @@ PreviewTexturePreloadCounters texturePreloadCounts;
 // drawn. Keep that working set resident; dropping an uploaded map cannot cause
 // the guest to repeat its already-completed upload.
 size_t colorBudget = 256 * 1024 * 1024;
+bool colorBudgetReported = false;
 size_t colorBytes = 0, pendingColorBytes = 0;
 uint64_t colorUse = 0;
 // Called with queueMutex held. Ordinary textures can be reconstructed from
@@ -332,7 +334,14 @@ bool equalRenderMemory(uint8_t* base,uint64_t address,const void* expected,size_
 }
 void setPreviewTextureBudget(size_t bytes) {
     std::lock_guard lock(queueMutex);
-    colorBudget=std::clamp(bytes,size_t(256*1024*1024),size_t(2ull*1024*1024*1024));
+    const auto next=std::clamp(bytes,size_t(256*1024*1024),size_t(2ull*1024*1024*1024));
+    if(colorBudgetReported && next==colorBudget)return;
+    const bool shrink=next<colorBudget;
+    colorBudget=next;
+    colorBudgetReported=true;
+    // Ordinary entries can be reconstructed; prompt generations must retain
+    // their original button names even if they alone exceed a reduced budget.
+    if(shrink)makeColorCacheRoom(0);
     std::fprintf(stderr,"[Performance] Native decoded texture cache budgetMiB=%zu\n",colorBudget/(1024*1024));
 }
 
@@ -1029,12 +1038,13 @@ static bool submitTriangles(uint8_t* base, uint32_t indices, uint32_t triangles)
 void previewObserveTriangles(uint8_t* base, uint32_t indices, uint32_t triangles) {
     submitTriangles(base, indices, triangles);
 }
-void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
+template<class Geometry>
+static void previewObserveWorldInto(uint8_t* base,Geometry&& geometry) {
     EngineCpuScope profile(EnginePhase::snapshot);
     if (!active) return;
     worldActive=true;
     try {
-        auto draw=captureWorldDraw(base,geometry);
+        auto draw=captureWorldDraw(base,std::forward<Geometry>(geometry));
         if(!draw)return;
         std::unique_lock lock(queueMutex);
         ++pendingCounts.worldDraws;
@@ -1042,10 +1052,10 @@ void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
         // once, not once per depth/light/fog/material pass. UI vertices are
         // copied per mesh and use a separate budget.
         size_t additionalVertices=0,additionalBytes=0;
-        // The caller and captured draw already own these resources through
+        // The captured draw owns these resources through
         // publication. Accounting needs identities, not extra shared_ptr copies
         // that contend with resource releases on the render thread.
-        const std::array resources{geometry.vertices.get(),geometry.indices.get()};
+        const std::array resources{draw->geometry.vertices.get(),draw->geometry.indices.get()};
         auto measureGeometry=[&] {
             additionalVertices=additionalBytes=0;
             for(size_t i=0;i<resources.size();++i) {
@@ -1116,6 +1126,9 @@ void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
                    (draw->fragmentName=="WModel_FXRenderSurface" && s==1) ||
                    ((draw->fragmentName=="WModel_FXHeatHazeMask" || draw->fragmentName=="WModel_FXBlackHole") &&
                     (s==1 || s==2)) ||
+                   // Darkness voice masks/noise are authored CPU images.
+                   // Its scene input at slot0 remains a GPU resolve.
+                   (draw->fragmentName=="XREngine_RadialBlurInvert" && s>=1 && s<=3) ||
                    // CCFuser texture1 is its original 324x18 RGB lookup map.
                    // Reload the source pixels if its CPU cache entry expired.
                    (draw->fragmentName=="XREngine_CCFuser" && s==1) ||
@@ -1180,6 +1193,12 @@ void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
         ++worldQueued;
     } catch (...) {}
 }
+void previewObserveWorld(uint8_t* base,const StoredDraw& geometry) {
+    previewObserveWorldInto(base,geometry);
+}
+void previewObserveWorld(uint8_t* base,StoredDraw&& geometry) {
+    previewObserveWorldInto(base,std::move(geometry));
+}
 void previewObserveImmediateWorld(uint8_t* base,uint32_t device,uint32_t indices,uint32_t count) {
     if (!active || !worldActive || !device || uint64_t(device)+12456>0x100000000ull) return;
     // Task-59 bounded pre-capture failure diagnostics. diagnose is read once;
@@ -1226,7 +1245,7 @@ void previewObserveImmediateWorld(uint8_t* base,uint32_t device,uint32_t indices
                 frames.load(std::memory_order_relaxed),GetTickCount64(),smokeTex0,
                 device,indices,count,descriptor,id,
                 geometry.vertices?geometry.vertices->vertexCount:0u,geometry.indexCount,beFlags);
-        previewObserveWorld(base,geometry);
+        previewObserveWorld(base,std::move(geometry));
     } catch (...) { fail(6); }
 }
 void previewObserveClear(uint8_t* base,uint32_t device,uint32_t flags,uint32_t color,float depth,uint32_t stencil,const std::array<int32_t,4>& rectangle) {

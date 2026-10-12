@@ -53,7 +53,20 @@ struct EngineVertexBindingState {
     bool operator==(const EngineVertexBindingState&) const = default;
 };
 struct EngineVertexBindingSnapshot : EngineVertexBindingState {
-    std::array<uint8_t, 4096> constantBytes{}; // 256 big-endian float4 vectors.
+private:
+    class CaptureStorage {
+        friend struct EngineVertexBindingSnapshot;
+        CaptureStorage() noexcept = default;
+    };
+    static CaptureStorage captureStorage() noexcept { return {}; }
+    friend bool snapshotEngineVertexBindings(uint8_t*, EngineVertexBindingSnapshot&) noexcept;
+    friend bool captureEngineVertexBindings(uint8_t*, std::optional<EngineVertexBindingSnapshot>&) noexcept;
+public:
+    EngineVertexBindingSnapshot() noexcept : constantBytes{} {}
+    // Only capture functions can create this tag. They overwrite the entire
+    // bank before publication, or discard the snapshot on failure.
+    explicit EngineVertexBindingSnapshot(CaptureStorage) noexcept {}
+    std::array<uint8_t, 4096> constantBytes; // 256 big-endian float4 vectors.
     bool operator==(const EngineVertexBindingSnapshot&) const = default;
 };
 // Uses this thread's last successfully completed original preparation. Checks

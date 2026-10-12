@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <string_view>
+#include <new>
 
 using namespace DarkRecomp::Native;
 extern "C" PPC_FUNC(__imp__sub_8223AFE8);
@@ -298,6 +299,12 @@ static void preparationBenchmark(uint8_t* base,const PPCContext& initial) {
 }
 int main(int argc,char** argv) {
     try {
+        alignas(EngineVertexBindingSnapshot) uint8_t defaultStorage[sizeof(EngineVertexBindingSnapshot)];
+        std::memset(defaultStorage,0xCD,sizeof(defaultStorage));
+        auto* defaults=new(defaultStorage) EngineVertexBindingSnapshot;
+        require(std::all_of(defaults->constantBytes.begin(),defaults->constantBytes.end(),
+            [](uint8_t byte){return byte==0;}),"Default vertex binding snapshot left uninitialized constants");
+        defaults->~EngineVertexBindingSnapshot();
         require(argc==2 || (argc==3 && (std::string_view(argv[2])=="--benchmark" || std::string_view(argv[2])=="--preparation-benchmark")),
                 "Expected game directory and optional --benchmark or --preparation-benchmark");Memory owner;memory=&owner;owner.load(argv[1]);PPCContext initial{};owner.initThread(initial);
         require(owner.commit(fixture,extent),"Cannot commit fixture");auto* base=owner.base();enableEnginePreview();

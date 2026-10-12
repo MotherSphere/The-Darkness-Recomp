@@ -173,6 +173,7 @@ uint64_t promptOriginAttempts();
 uint64_t promptOriginClassified();
 void previewObserveTriangles(uint8_t* base, uint32_t indices, uint32_t triangles);
 void previewObserveWorld(uint8_t* base,const StoredDraw&);
+void previewObserveWorld(uint8_t* base,StoredDraw&&);
 void previewObserveImmediateWorld(uint8_t* base,uint32_t device,uint32_t indices,uint32_t indexCount);
 void previewObserveClear(uint8_t* base,uint32_t device,uint32_t flags,uint32_t color,float depth,uint32_t stencil,const std::array<int32_t,4>& rectangle);
 // Output of original 8225F320 at the triangle draw call site in 8225DE78.

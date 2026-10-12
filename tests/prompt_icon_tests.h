@@ -346,6 +346,63 @@ static void testPromptCacheRetention() {
     std::puts("PromptCacheRetention passed: Back/Tab survives 256 MiB pressure, ordinary LRU stays bounded, a full retained cache rejects overflow, sources switch and invalidation preserves owned generations.");
 }
 
+static void testTextureBudgetTransitions() {
+    using namespace DarkRecomp;
+    using namespace DarkRecomp::Native;
+    using namespace DarkRecomp::Prompts;
+    constexpr uint32_t promptId=60600,ordinaryFirst=60700,ordinaryCount=17,resource=0x607000;
+    struct FixtureCleanup {
+        static void clear() {
+            previewPrepareTexture(promptId);
+            for(unsigned i=0;i<ordinaryCount;++i)previewPrepareTexture(ordinaryFirst+i);
+        }
+        ~FixtureCleanup() {clear();setPreviewTextureBudget(256ull*1024*1024);}
+    } cleanup;
+    enableEnginePreview();
+    setPreviewTextureBudget(320ull*1024*1024);
+    auto prompt=std::make_shared<ColorImage>(promptTestImage(200,40,40,32,32,uint8_t(Origin::Back)));
+    auto ordinary=std::make_shared<ColorImage>();ordinary->width=ordinary->height=2048;
+    ordinary->pixels.resize(2048ull*2048*4,37);
+    previewPublishTexture(promptId,resource,prompt);
+    for(unsigned i=0;i<ordinaryCount;++i)previewPublishTexture(ordinaryFirst+i,resource+i+1,ordinary);
+    for(unsigned i=0;i<ordinaryCount;++i)
+        require(previewCapturedTexture(ordinaryFirst+i,resource+i+1)==ordinary,
+            "Recovered CPU budget did not retain the complete texture working set");
+    const auto consumer=previewCapturedTexture(ordinaryFirst,resource+1);
+    setPreviewTextureBudget(256ull*1024*1024);
+    require(previewCapturedTexture(promptId,resource)==prompt,
+        "CPU budget shrink evicted a pinned prompt generation");
+    for(unsigned i=0;i<ordinaryCount;++i)
+        require(previewCapturedTexture(ordinaryFirst+i,resource+i+1)==(i<2?nullptr:ordinary),
+            "CPU budget shrink did not immediately trim ordinary entries in LRU order");
+    require(consumer==ordinary && consumer->pixels.size()==2048ull*2048*4 &&
+            std::all_of(consumer->pixels.begin(),consumer->pixels.end(),[](uint8_t value){return value==37;}),
+        "CPU budget shrink changed an image already owned by a consumer");
+    setPreviewTextureBudget(320ull*1024*1024);
+    for(unsigned i=0;i<2;++i)previewPublishTexture(ordinaryFirst+i,resource+i+1,ordinary);
+    for(unsigned i=0;i<ordinaryCount;++i)
+        require(previewCapturedTexture(ordinaryFirst+i,resource+i+1)==ordinary,
+            "Recovered CPU budget could not readmit evicted immutable images");
+
+    FixtureCleanup::clear();
+    // Keep a separate immutable generation: adding a prompt tag to the image
+    // already held by consumer would violate the cache's ownership contract.
+    auto protectedImage=std::make_shared<ColorImage>(*ordinary);
+    protectedImage->promptOrigin=uint8_t(Origin::Back);
+    for(unsigned i=0;i<ordinaryCount;++i)previewPublishTexture(ordinaryFirst+i,resource+i+1,protectedImage);
+    auto newcomer=std::make_shared<ColorImage>(promptTestImage(1,2,3,1,1));
+    previewPublishTexture(promptId,resource,newcomer);
+    require(previewCapturedTexture(promptId,resource)==newcomer,"Protected-pressure fixture did not fit its grown budget");
+    setPreviewTextureBudget(256ull*1024*1024);
+    require(!previewCapturedTexture(promptId,resource),"CPU budget shrink retained an ordinary victim above its cap");
+    for(unsigned i=0;i<ordinaryCount;++i)
+        require(previewCapturedTexture(ordinaryFirst+i,resource+i+1)==protectedImage,
+            "CPU budget shrink discarded a pinned generation above its new cap");
+    previewPublishTexture(promptId,resource,newcomer);
+    require(!previewCapturedTexture(promptId,resource),"Over-cap pinned generations admitted a new ordinary image");
+    std::puts("TextureBudgetTransitions: growth retains and readmits images, shrink trims LRU immediately, consumer ownership and over-cap prompt generations survive.");
+}
+
 static void testPromptIcons() {
     using namespace DarkRecomp::Prompts;
     testPromptRenderContext();
@@ -353,6 +410,7 @@ static void testPromptIcons() {
     testPromptLayout();
     setBindingLabels(defaultBindingLabels(), defaultGameplayBindingLabels());
     testPromptCacheRetention();
+    testTextureBudgetTransitions();
     require(originFromName("GUI_Button_A") == Origin::A, "XTC A did not classify");
     require(originFromName("GUI_Button_DRL") == Origin::DRL, "Paired DRL lost");
     require(originFromName("GUI_Button_DUD") == Origin::DUD, "Paired DUD lost");
