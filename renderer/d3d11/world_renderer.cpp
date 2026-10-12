@@ -3,6 +3,7 @@
 #include "world_render_state.h"
 #include "world_darkness_bloom.h"
 #include "shader_bytecode_cache.h"
+#include "texture_budget_policy.h"
 #include "runtime/native/graphics_settings.h"
 #include "renderer/engine/prompt_icons.h"
 #include "renderer/engine/prompt_layout.h"
@@ -236,10 +237,22 @@ WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,ui
             unsigned(otherWorldProbe_),unsigned(otherWorldBypass_));
     if(scale<1 || scale>3)throw std::invalid_argument("World render scale must be between one and three");
     Ptr<IDXGIDevice> dxgi;Ptr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
-    if(SUCCEEDED(device_.As(&dxgi)) && SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&desc)) && desc.DedicatedVideoMemory)
-        imageBudget_=std::clamp(size_t(desc.DedicatedVideoMemory/4),size_t(256*1024*1024),size_t(2ull*1024*1024*1024));
+    const auto dxgiStatus=device_.As(&dxgi);
+    const auto adapterStatus=SUCCEEDED(dxgiStatus)?dxgi->GetAdapter(&adapter):dxgiStatus;
+    const auto descriptionStatus=SUCCEEDED(adapterStatus)?adapter->GetDesc(&desc):adapterStatus;
+    imageDedicatedBytes_=SUCCEEDED(descriptionStatus)?uint64_t(desc.DedicatedVideoMemory):0;
+    imageHardwareBudget_=TextureBudgetPolicy::hardwareCap(imageDedicatedBytes_);
     MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
-    if(GlobalMemoryStatusEx(&memory))imageBudget_=(std::min)(imageBudget_,(std::max)(size_t(256*1024*1024),size_t(memory.ullAvailPhys/4)));
+    const bool memorySuccess=GlobalMemoryStatusEx(&memory)!=0;
+    const auto memoryError=memorySuccess?0ul:GetLastError();
+    imageBudget_=TextureBudgetPolicy::initialBudget(imageHardwareBudget_,memorySuccess,memory.ullAvailPhys);
+    nextImageBudgetSample_=GetTickCount64()+TextureBudgetPolicy::refreshIntervalMs;
+    std::fprintf(stderr,"[TextureBudget] phase=initial adapterAs=%08X adapterGet=%08X adapterDesc=%08X adapter=%ls dedicatedBytes=%llu memorySuccess=%u memoryError=%lu totalPhys=%llu availPhys=%llu memoryLoad=%lu hardwareCapMiB=%zu hostCapMiB=%zu selectedMiB=%zu\n",
+        unsigned(dxgiStatus),unsigned(adapterStatus),unsigned(descriptionStatus),desc.Description,
+        static_cast<unsigned long long>(imageDedicatedBytes_),unsigned(memorySuccess),memoryError,
+        memory.ullTotalPhys,memory.ullAvailPhys,memory.dwMemoryLoad,imageHardwareBudget_/TextureBudgetPolicy::MiB,
+        memorySuccess?TextureBudgetPolicy::hostCap(memory.ullAvailPhys)/TextureBudgetPolicy::MiB:0,
+        imageBudget_/TextureBudgetPolicy::MiB);
     // The original cache enumerates actual engine programs, rather than the
     // template's combinatorial option space. Prepare their native raster
     // forms before the guest starts, just like the fragment programs below.
@@ -2332,6 +2345,28 @@ void WorldRendererD3D11::printPerformance() {
     std::fprintf(stderr,"[RenderBudget] deferred=%llu budgetMiB=%zu worstDecodeMs=%.3f worstDecodeBytes=%zu worstUploadMs=%.3f worstUploadBytes=%zu worstKind=%s\n",budgetDeferred_,kFrameUploadBudgetBytes/(1024*1024),worstDecodeMs_,worstDecodeBytes_,worstUploadMs_,worstUploadBytes_,worstUploadKind_);
     worstDecodeMs_=0;worstDecodeBytes_=0;worstUploadMs_=0;worstUploadBytes_=0;worstUploadKind_="";
 }
+bool WorldRendererD3D11::applyImageBudget(size_t budget) {
+    if(budget==imageBudget_)return false;
+    imageBudget_=budget;
+    while(!images_.empty() && imageBytes_>imageBudget_) {
+        const auto oldest=std::min_element(images_.begin(),images_.end(),[](const auto& l,const auto& r){return l.second.used<r.second.used;});
+        imageBytes_-=oldest->second.bytes;images_.erase(oldest);
+    }
+    return true;
+}
+void WorldRendererD3D11::refreshImageBudget() {
+    if(!TextureBudgetPolicy::sampleDue(GetTickCount64(),nextImageBudgetSample_))return;
+    MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
+    const bool memorySuccess=GlobalMemoryStatusEx(&memory)!=0;
+    const auto chosen=TextureBudgetPolicy::refreshBudget(imageBudget_,imageHardwareBudget_,memorySuccess,memory.ullAvailPhys);
+    const auto previous=imageBudget_;
+    if(!applyImageBudget(chosen))return;
+    std::fprintf(stderr,"[TextureBudget] phase=refresh dedicatedBytes=%llu memorySuccess=%u totalPhys=%llu availPhys=%llu memoryLoad=%lu hardwareCapMiB=%zu hostCapMiB=%zu previousMiB=%zu selectedMiB=%zu\n",
+        static_cast<unsigned long long>(imageDedicatedBytes_),unsigned(memorySuccess),memory.ullTotalPhys,memory.ullAvailPhys,
+        memory.dwMemoryLoad,imageHardwareBudget_/TextureBudgetPolicy::MiB,
+        TextureBudgetPolicy::hostCap(memory.ullAvailPhys)/TextureBudgetPolicy::MiB,
+        previous/TextureBudgetPolicy::MiB,imageBudget_/TextureBudgetPolicy::MiB);
+}
 void WorldRendererD3D11::beginFrame() {
     Native::setRenderSamplePhase(Native::RenderSamplePhase::frame);
     frameUploadBytes_ = 0;
@@ -2344,6 +2379,10 @@ void WorldRendererD3D11::beginFrame() {
     for(auto it=images_.begin();it!=images_.end();) {
         if(it->second.source.use_count()==1) {imageBytes_-=it->second.bytes;it=images_.erase(it);} else ++it;
     }
+    // Discard orphan images before pressure trims live LRU entries. No raw
+    // last-draw binding identity survives eviction at this boundary; snapshots
+    // and COM bindings retain their independent lifetimes.
+    refreshImageBudget();
     // Immediate geometry is owned by a single frame. Do not retain thousands
     // of obsolete snapshots or force scans of a full cache for every draw.
     for(auto it=geometry_.begin();it!=geometry_.end();) {

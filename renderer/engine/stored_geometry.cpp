@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 namespace DarkRecomp::Native {
@@ -342,7 +343,7 @@ StoredDraw StoredGeometryCache::draw(uint8_t* base, uint32_t vertexId, uint32_t 
         if (verdict == Verdict::kInvalid) { ++stats_.invalidDraws; return {}; }
         v->used = i->used = ++clock_;
         ++stats_.matchedDraws;
-        return {vertices, indices, firstIndex, indexCount};
+        return {std::move(vertices), std::move(indices), firstIndex, indexCount};
     } catch (...) { return {}; }
 }
 std::shared_ptr<const StoredGeometry> StoredGeometryCache::vertexStream(uint8_t* base,uint32_t id,uint32_t bound) noexcept {

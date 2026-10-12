@@ -7,6 +7,12 @@ struct WorldImageBudgetTestAccess {
     static size_t setBudget(WorldRendererD3D11& renderer,size_t budget) {
         const auto previous=renderer.imageBudget_;renderer.imageBudget_=budget;return previous;
     }
+    static uint64_t setSampleDeadline(WorldRendererD3D11& renderer,uint64_t deadline) {
+        const auto previous=renderer.nextImageBudgetSample_;renderer.nextImageBudgetSample_=deadline;return previous;
+    }
+    static bool applyBudget(WorldRendererD3D11& renderer,size_t budget) {
+        renderer.invalidateBindings();return renderer.applyImageBudget(budget);
+    }
     static bool contains(const WorldRendererD3D11& renderer,const ColorImage* source) {
         return renderer.images_.contains(source);
     }
@@ -46,9 +52,10 @@ static void imagePreloadBudgetContract(WorldRendererD3D11& renderer,ID3D11Device
     const auto resident=Access::residentSources(renderer);
     const auto bytes=Access::residentBytes(renderer);
     struct BudgetRestore {
-        WorldRendererD3D11& renderer;size_t previous;
-        ~BudgetRestore() {Access::setBudget(renderer,previous);}
-    } restore{renderer,Access::setBudget(renderer,bytes+cold->bytes())};
+        WorldRendererD3D11& renderer;size_t previous;uint64_t sampleDeadline;
+        ~BudgetRestore() {Access::setBudget(renderer,previous);Access::setSampleDeadline(renderer,sampleDeadline);}
+    } restore{renderer,Access::setBudget(renderer,bytes+cold->bytes()),
+        Access::setSampleDeadline(renderer,std::numeric_limits<uint64_t>::max())};
     ComPtr<ID3D11ShaderResourceView> before;context->PSGetShaderResources(0,1,&before);
     const auto uploads=renderer.imageUploadCount(),activeUse=Access::used(renderer,active.get());
     require(renderer.preloadImage(cold) && renderer.imageUploadCount()==uploads+1,
@@ -80,6 +87,78 @@ static void imagePreloadBudgetContract(WorldRendererD3D11& renderer,ID3D11Device
     require(renderer.draw(draw) && renderer.imageUploadCount()==uploads+2,
             "Active GPU texture was reuploaded after speculative cache pressure");
     std::puts("ImagePreloadBudget: exact fit, full-cache hits, refused uploads, unchanged bindings and cold-first normal eviction passed.");
+}
+
+static void imageBudgetRecoveryContract(ID3D11Device* device,ID3D11DeviceContext* context) {
+    using Access=DarkRecomp::WorldImageBudgetTestAccess;
+    context->ClearState();WorldRendererD3D11 renderer(device,context);
+    // Tiny capacities exercise the same demand/trim path without allocating
+    // hundreds of MiB. Pure policy tests cover actual hardware/host capacities.
+    Access::setSampleDeadline(renderer,std::numeric_limits<uint64_t>::max());
+    Access::setBudget(renderer,8);
+    auto geometry=std::make_shared<StoredGeometry>();geometry->vertexCount=3;geometry->stride=16;
+    geometry->formats[0]=4;geometry->vertices.resize(48);geometry->indices={0,1,2};
+    const EngineVector positions[]{{-.75f,-.75f,.5f,1},{0,.75f,.5f,1},{.75f,-.75f,.5f,1}};
+    for(unsigned i=0;i<3;++i)for(unsigned lane=0;lane<4;++lane)
+        put(geometry->vertices.data()+i*16+lane*4,std::bit_cast<uint32_t>(positions[i][lane]));
+    WorldClear clear;clear.targets={1,0,0,0,2};clear.viewport={0,0,64,64};clear.flags=49;
+    WorldDraw draw;draw.geometry.vertices=draw.geometry.indices=geometry;draw.geometry.indexCount=3;
+    draw.viewport=clear.viewport;draw.targets=clear.targets;draw.material=WorldMaterial::fixed;
+    draw.fragmentName="MRenderXenon_Attrib_TexEnvMode01";
+    auto binding=fixture(0,false);binding.descriptor.flags=0x03000000;binding.descriptor.modes.fill(4);
+    const auto descriptor=encodeEngineVertexDescriptor(binding.descriptor);binding.key={};
+    for(unsigned i=0;i<5;++i)for(unsigned n=0;n<4;++n)
+        binding.key[i+1]=(binding.key[i+1]<<8)|descriptor[i*4+n];
+    std::fill_n(binding.constantBytes.data()+7*16,16,uint8_t(0));
+    require(prepareWorldVertexProgram(binding,draw.options,draw.constants),"Cache recovery vertex binding rejected");
+    draw.constants.vectors[10]={1,1,1,1};draw.fragmentConstants[0]={0,0,0,0};
+    draw.samplers[0]=decodeWorldSampler({2,0,0,0,0,0});
+    put(draw.attributes.data()+92,0x01100000);draw.attributes[96]=draw.attributes[97]=8;
+    constantTexgen(draw,0,{.5f,.5f,0,1});
+    std::array<std::shared_ptr<ColorImage>,3> images;
+    for(unsigned color=0;color<3;++color) {
+        images[color]=std::make_shared<ColorImage>();images[color]->width=images[color]->height=1;
+        images[color]->authoredMips=true;images[color]->pixels={0,0,0,255};images[color]->pixels[color]=255;
+    }
+    auto demand=[&](unsigned color) {
+        renderer.beginFrame();renderer.clear(clear);draw.textures[0]=images[color];
+        require(renderer.draw(draw),"Cache recovery demanded image draw rejected");
+        const auto pixels=renderer.readSurface(1,false);uint16_t center[4]{};
+        std::memcpy(center,pixels.data()+(32*64+32)*8,8);
+        for(unsigned channel=0;channel<3;++channel)
+            require(center[channel]==(channel==color?0x3c00:0),"Cache capacity change altered demanded pixels");
+        require(Access::residentBytes(renderer)<=renderer.textureBudget(),"Bounded recovery fixture exceeded cache capacity");
+    };
+    for(unsigned color=0;color<3;++color)demand(color);
+    const auto firstCycle=renderer.imageUploadCount();
+    for(unsigned cycle=0;cycle<2;++cycle)for(unsigned color=0;color<3;++color)demand(color);
+    require(renderer.imageUploadCount()==firstCycle+6,"Undersized cyclic fixture did not reproduce repeat demand uploads");
+    require(Access::applyBudget(renderer,12),"Recovered capacity did not report a change");
+    for(unsigned color=0;color<3;++color)demand(color);
+    const auto warmed=renderer.imageUploadCount();
+    for(unsigned cycle=0;cycle<4;++cycle)for(unsigned color=0;color<3;++color)demand(color);
+    require(renderer.imageUploadCount()==warmed && Access::residentBytes(renderer)==12,
+            "Recovered cyclic working set continued uploading after warmup");
+    for(const auto& image:images)require(Access::contains(renderer,image.get()),"Recovered working-set image lost residency");
+    require(!Access::applyBudget(renderer,12) && renderer.imageUploadCount()==warmed,
+            "Unchanged capacity reported a change or uploaded images");
+    ComPtr<ID3D11ShaderResourceView> bound;context->PSGetShaderResources(0,1,&bound);
+    require(bound!=nullptr,"Recovery fixture demanded binding missing");
+    require(Access::applyBudget(renderer,8) && Access::residentBytes(renderer)==8,
+            "Pressure shrink did not trim resident GPU cache at boundary");
+    // Empty the tiny fixture cache without drawing an oversized demand. This
+    // explicitly evicts the currently bound image, whose COM view must live.
+    require(Access::applyBudget(renderer,2) && Access::residentBytes(renderer)==0 &&
+            !Access::contains(renderer,images[2].get()),"Bound image was not evicted by boundary shrink");
+    ComPtr<ID3D11ShaderResourceView> retained;context->PSGetShaderResources(0,1,&retained);
+    require(retained.Get()==bound.Get(),"Boundary trimming invalidated retained COM binding");
+    ComPtr<ID3D11Resource> retainedResource;retained->GetResource(&retainedResource);
+    require(retainedResource!=nullptr,"Evicted bound image resource lost COM lifetime");
+    require(Access::applyBudget(renderer,8),"Demand capacity was not restored after bound-image lifetime check");
+    for(unsigned color=0;color<3;++color)demand(color);
+    require(renderer.imageUploadCount()>warmed,"Pressure shrink did not restore demanded-image upload behavior");
+    context->ClearState();
+    std::puts("ImageBudgetRecovery passed: cyclic pressure, recovered warm residency, unchanged capacity, boundary shrink, retained binding and exact demanded pixels.");
 }
 
 // Read every GPU subresource of an authored cube. Distinct mip, face, row and

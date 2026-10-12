@@ -118,6 +118,10 @@ class WorldRendererD3D11 {
     std::unordered_map<const ColorImage*,Image> images_;
     size_t imageBytes_=0;
     size_t imageBudget_=512*1024*1024;
+    size_t imageHardwareBudget_=512*1024*1024;
+    uint64_t imageDedicatedBytes_=0,nextImageBudgetSample_=0;
+    bool applyImageBudget(size_t);
+    void refreshImageBudget();
     uint64_t imageUploads_=0,profileDraws_=0;
     double profileTextures_=0,profileGeometry_=0,profileBinding_=0,profileStates_=0,profileSubmit_=0;
     struct FragmentProgram {Ptr<ID3D11PixelShader> shader;unsigned textures=0,cubes=0;};

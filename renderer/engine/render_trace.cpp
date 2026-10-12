@@ -27,6 +27,7 @@
 #include <optional>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <xmmintrin.h>
 
@@ -1566,7 +1567,7 @@ PPC_FUNC(sub_82868FE8) {
         }
         if (owned) {
             const auto floatingPointMode=_mm_getcsr();
-            DarkRecomp::Native::previewObserveWorld(base,owned);
+            DarkRecomp::Native::previewObserveWorld(base,std::move(owned));
             _mm_setcsr(floatingPointMode);
         }
     }

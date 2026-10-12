@@ -214,19 +214,51 @@ static void constantTexgen(WorldDraw& draw,unsigned stage,EngineVector value) {
     for(unsigned row=0;row<4;++row)draw.constants.vectors[base+row]={0,0,0,value[row]};
 }
 static void constantCopyContract() {
-    auto b=fixture(8,false);WorldVertexOptions options;WorldVertexConstants constants;
-    const auto vector=b.descriptor.palette;
-    for(auto bits:{0u,0x80000000u,1u,0x80000001u,0x7F7FFFFFu,0xFF7FFFFFu}) {
-        put(b.constantBytes.data()+vector*16+8,bits);
-        require(prepareWorldVertexProgram(b,options,constants) && std::bit_cast<uint32_t>(constants.vectors[vector][2])==bits,
-                "Native constant copy changed finite endian/float bits");
-    }
-    for(auto bits:{0x7F800000u,0xFF800000u,0x7FC00000u,0xFFFFFFFFu}) {
-        const auto savedOptions=options;const auto savedConstants=constants;
-        put(b.constantBytes.data()+vector*16+8,bits);
-        require(!prepareWorldVertexProgram(b,options,constants),"Native vertex constants accepted infinity or NaN");
-        require(options==savedOptions && constants.vectors==savedConstants.vectors && constants.references==savedConstants.references,
-                "Rejected vertex preparation changed published constants");
+    auto baseline=fixture(8,false);
+    // Mode10 supplies a three-vector range, alongside the projection's four,
+    // offset/scale pair, color row and full 156-vector palette.
+    baseline.descriptor.modes[1]=10;
+    baseline.descriptor.parameters[1][0]=32;
+    const auto descriptor=encodeEngineVertexDescriptor(baseline.descriptor);
+    baseline.key={};
+    for(unsigned i=0;i<5;++i)for(unsigned n=0;n<4;++n)
+        baseline.key[i+1]=(baseline.key[i+1]<<8)|descriptor[i*4+n];
+    WorldVertexOptions options;WorldVertexConstants constants;
+    constexpr std::array finiteBits{0u,0x80000000u,1u,0x80000001u,0x7F7FFFFFu,0xFF7FFFFFu};
+    const std::array ranges{std::pair{0u,4u},std::pair{32u,3u},std::pair{7u,2u},
+        std::pair{unsigned(baseline.descriptor.color),1u},std::pair{unsigned(baseline.descriptor.palette),156u}};
+    for(const auto [first,count]:ranges) {
+        // Rotate finite patterns through every lane, including signed zero,
+        // signed subnormals and the largest finite positive/negative floats.
+        for(unsigned pattern=0;pattern<finiteBits.size();++pattern) {
+            auto b=baseline;
+            for(unsigned vector=0;vector<count;++vector)for(unsigned lane=0;lane<4;++lane)
+                put(b.constantBytes.data()+(first+vector)*16+lane*4,
+                    finiteBits[(vector*4+lane+pattern)%finiteBits.size()]);
+            require(prepareWorldVertexProgram(b,options,constants),"Native finite constant range rejected");
+            for(unsigned vector=0;vector<count;++vector)for(unsigned lane=0;lane<4;++lane)
+                require(std::bit_cast<uint32_t>(constants.vectors[first+vector][lane])==
+                            finiteBits[(vector*4+lane+pattern)%finiteBits.size()],
+                        "Native constant copy changed finite endian/float bits");
+        }
+        auto rejectAt=[&](unsigned vector) {
+            for(unsigned lane=0;lane<4;++lane)
+                for(auto bits:{0x7F800000u,0xFF800000u,0x7FC00000u,0x7F800001u,0xFFFFFFFFu}) {
+                    auto b=baseline;
+                    put(b.constantBytes.data()+(first+vector)*16+lane*4,bits);
+                    const auto savedOptions=options;const auto savedConstants=constants;
+                    require(!prepareWorldVertexProgram(b,options,constants),"Native vertex constants accepted infinity or NaN");
+                    require(options==savedOptions &&
+                            !std::memcmp(constants.vectors.data(),savedConstants.vectors.data(),sizeof(constants.vectors)) &&
+                            constants.references==savedConstants.references,
+                            "Rejected vertex preparation changed published constants");
+                }
+        };
+        if(count==156) {
+            // First, middle and final vectors; each position inside a batch
+            // and the boundary between adjacent batches must reject poison.
+            for(unsigned vector:{0u,1u,3u,4u,78u,152u,153u,154u,155u})rejectAt(vector);
+        } else for(unsigned vector=0;vector<count;++vector)rejectAt(vector);
     }
 }
 // Independent analytic oracle for diagonal affine palette matrices. Each bone
@@ -1789,7 +1821,7 @@ static void worldRendererDebugContract(ID3D11Device* device) {
 int main(int argc,char** argv) {
     ComPtr<ID3D11Device> device;
     try {
-        bool warp=false,cpuOnly=false,colorGradeOnly=false,guiFadeOnly=false,resolutionSwitchOnly=false,frontbufferOnly=false,clipPlanesOnly=false,bloomOnly=false,armBloomOnly=false;
+        bool warp=false,cpuOnly=false,colorGradeOnly=false,guiFadeOnly=false,resolutionSwitchOnly=false,frontbufferOnly=false,clipPlanesOnly=false,bloomOnly=false,armBloomOnly=false,textureBudgetOnly=false;
         for(int i=1;i<argc;++i) {
             if(std::strcmp(argv[i],"--warp")==0)warp=true;
             else if(std::strcmp(argv[i],"--cpu-only")==0)cpuOnly=true;
@@ -1800,11 +1832,12 @@ int main(int argc,char** argv) {
             else if(std::strcmp(argv[i],"--clip-planes-only")==0)clipPlanesOnly=true;
             else if(std::strcmp(argv[i],"--bloom-only")==0)bloomOnly=true;
             else if(std::strcmp(argv[i],"--arm-bloom-only")==0)armBloomOnly=true;
-            else throw std::runtime_error("Unknown argument; expected --warp, --cpu-only, --color-grade-only, --gui-fade-only, --resolution-switch-only, --frontbuffer-only, --clip-planes-only, --bloom-only or --arm-bloom-only");
+            else if(std::strcmp(argv[i],"--texture-budget-only")==0)textureBudgetOnly=true;
+            else throw std::runtime_error("Unknown argument; expected --warp, --cpu-only, --color-grade-only, --gui-fade-only, --resolution-switch-only, --frontbuffer-only, --clip-planes-only, --bloom-only, --arm-bloom-only or --texture-budget-only");
         }
-        require(unsigned(cpuOnly)+unsigned(colorGradeOnly)+unsigned(guiFadeOnly)+unsigned(resolutionSwitchOnly)+unsigned(frontbufferOnly)+unsigned(clipPlanesOnly)+unsigned(bloomOnly)+unsigned(armBloomOnly)<=1,
+        require(unsigned(cpuOnly)+unsigned(colorGradeOnly)+unsigned(guiFadeOnly)+unsigned(resolutionSwitchOnly)+unsigned(frontbufferOnly)+unsigned(clipPlanesOnly)+unsigned(bloomOnly)+unsigned(armBloomOnly)+unsigned(textureBudgetOnly)<=1,
             "Focused contract modes are mutually exclusive");
-        if(!colorGradeOnly && !guiFadeOnly && !resolutionSwitchOnly && !frontbufferOnly && !clipPlanesOnly && !bloomOnly && !armBloomOnly) {
+        if(!colorGradeOnly && !guiFadeOnly && !resolutionSwitchOnly && !frontbufferOnly && !clipPlanesOnly && !bloomOnly && !armBloomOnly && !textureBudgetOnly) {
             constantCopyContract();lightingValidationContract();promptWorldContract();
             formats();paletteUsageContract();paletteArithmeticContract();worldPositionUsageContract();worldWaterUsageContract();worldShadowInputContract();
             worldVertexValidationContract();immediateIndexOwnershipContract();
@@ -1816,6 +1849,12 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11DeviceContext> context;const D3D_FEATURE_LEVEL level=D3D_FEATURE_LEVEL_11_0;
         const auto deviceFlags=GetEnvironmentVariableA("DARK_D3D_DEBUG",nullptr,0)?D3D11_CREATE_DEVICE_DEBUG:0;
         check(D3D11CreateDevice(nullptr,warp?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,deviceFlags,&level,1,D3D11_SDK_VERSION,&device,nullptr,&context),"D3D device");
+        if(textureBudgetOnly) {
+            imageBudgetRecoveryContract(device.Get(),context.Get());
+            worldRendererDebugContract(device.Get());context->ClearState();
+            std::printf("WorldTextureBudgetRecoveryContract passed: %s.\n",warp?"WARP":"hardware");
+            return 0;
+        }
         if(armBloomOnly) {
             darknessArmBloomContract(device.Get(),context.Get());
             worldRendererDebugContract(device.Get());context->ClearState();

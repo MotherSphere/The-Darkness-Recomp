@@ -104,6 +104,122 @@ static void darknessFixedCompositeContract(WorldRendererD3D11& renderer) {
     std::printf("DarknessFixedComposite: %u full-output RGBA checks, distinct atlas UVs, modulation and mixed c0 passed.\n",checks);
 }
 
+// Original Fulton Darkness-voice capture: constant bits,
+// distinct UV streams and sampler addressing; normalized geometry and synthetic
+// finite textures keep the independent ARB oracle distributable.
+// Inputs: baseline-fulton-issue98-20261012-01/trace/owned-effect-1.jsonl draws0..3.
+static void capturedVoiceShaderContract(WorldRendererD3D11& renderer) {
+    constexpr const char* captured[]{
+        "0000403f0000803e0000403f0000803ecdcc4c3b610bb63b000000003d860d3c0000803f000040400000a0400000e04000001041000030410000504100007041458c813e9c38003f458c813e0000803f5c49543d5c49543d5c49543d0000803ff09ea070000000000000c07f0000c0ff000020c000003041000000003d860d3c",
+        "0000403f0000803e0000403f0000803ecdcc4c3b610bb63b00000000f4552a3d0000803f000040400000a0400000e04000001041000030410000504100007041c373873e8a10013fc373873e0000803fee807f3eee807f3eee807f3e0000803ff09ea07060dddbd60000c07f0000c0ff000020c00000304100000000f4552a3d",
+        "0000403f0000803e0000403f0000803ecdcc4c3b610bb63b00000000dc55853d0000803f000040400000a0400000e04000001041000030410000504100007041b6aa8b3eacaa013fb6aa8b3e0000803fca00c83eca00c83eca00c83e0000803ff09ea070000000000000c07f0000c0ff000020c00000304100000000dc55853d",
+        "0000403f0000803e0000403f0000803ecdcc4c3b610bb63b00000000966b813e0000803f000040400000a0400000e040000010410000304100005041000070410e4cad3e9478063f0e4cad3e0000803f6121c23f6121c23f6121c23f0000803ff09ea07060dddbd60000c07f0000c0ff000020c00000304100000000966b813e"
+    };
+    auto geometry=std::make_shared<StoredGeometry>();
+    geometry->vertexCount=4;geometry->stride=28;
+    geometry->formats[0]=3;geometry->formats[1]=geometry->formats[2]=2;
+    geometry->vertices.resize(112);geometry->indices={0,1,3,3,1,2};
+    constexpr float positions[4][3]{{1,-1,.5f},{-1,-1,.5f},{-1,1,.5f},{1,1,.5f}};
+    constexpr float uv0[4][2]{{1,.5f},{.5f,.5f},{.5f,0},{1,0}};
+    constexpr float uv1[4][2]{{1,1},{0,1},{0,0},{1,0}};
+    for(unsigned v=0;v<4;++v) {
+        auto* bytes=geometry->vertices.data()+v*28;
+        for(unsigned c=0;c<3;++c)put(bytes+c*4,std::bit_cast<uint32_t>(positions[v][c]));
+        for(unsigned c=0;c<2;++c) {
+            put(bytes+12+c*4,std::bit_cast<uint32_t>(uv0[v][c]));
+            put(bytes+20+c*4,std::bit_cast<uint32_t>(uv1[v][c]));
+        }
+    }
+    auto image=[](const std::array<uint8_t,16>& red) {
+        auto result=std::make_shared<ColorImage>();result->width=result->height=4;
+        for(auto value:red)result->pixels.insert(result->pixels.end(),{value,value,value,255});
+        return result;
+    };
+    constexpr std::array<uint8_t,16> mask0{32,64,96,128, 64,96,128,160, 96,128,160,192, 128,160,192,224};
+    constexpr std::array<uint8_t,16> mask1{224,192,160,128, 192,160,128,96, 160,128,96,64, 128,96,64,32};
+    constexpr std::array<uint8_t,16> noise{16,80,144,240, 48,112,208,176, 96,224,64,128, 232,24,160,56};
+    auto scene=std::make_shared<ColorImage>();scene->width=scene->height=4;
+    constexpr std::array<uint8_t,4> sceneColor{48,96,160,192};
+    for(unsigned i=0;i<16;++i)scene->pixels.insert(scene->pixels.end(),sceneColor.begin(),sceneColor.end());
+    auto sample=[](const auto& pixels,double u,double v,bool wrap) {
+        const double x=u*4-.5,y=v*4-.5;
+        const int ix=int(std::floor(x)),iy=int(std::floor(y));
+        const double fx=x-ix,fy=y-iy;
+        const auto address=[&](int i) {return wrap?unsigned((i%4+4)%4):unsigned(std::clamp(i,0,3));};
+        const auto red=[&](int px,int py) {return pixels[address(py)*4+address(px)]/255.0;};
+        const double a=red(ix,iy)*(1-fx)+red(ix+1,iy)*fx;
+        const double b=red(ix,iy+1)*(1-fx)+red(ix+1,iy+1)*fx;
+        return a*(1-fy)+b*fy;
+    };
+    auto half=[](uint16_t h) {const unsigned e=(h>>10)&31,m=h&1023;
+        return std::ldexp(double(e?1024+m:m),int(e?e:1)-25)*(h&0x8000?-1:1);};
+    WorldDraw draw;draw.geometry={geometry,geometry,0,6};
+    draw.material=WorldMaterial::post;draw.fragmentName="XREngine_RadialBlurInvert";
+    draw.textureMask=worldFragmentTextureMask(draw.fragmentName,0);
+    draw.textureIds[0]=12650;draw.textureIds[1]=734;draw.textureIds[2]=735;draw.textureIds[3]=11572;
+    draw.textures[0]=scene;draw.textures[1]=image(mask0);draw.textures[2]=image(mask1);draw.textures[3]=image(noise);
+    draw.options.modes.fill(4);draw.options.modes[0]=draw.options.modes[1]=0;draw.options.coordinates[1]=1;
+    for(unsigned c=0;c<4;++c)draw.constants.vectors[c][c]=1;
+    draw.constants.references[0][2]=10;draw.constants.vectors[10]={1,1,1,1};
+    draw.attributes[97]=8;put(draw.attributes.data()+92,0x01100000);
+    for(unsigned slot=0;slot<4;++slot) {
+        auto& s=draw.samplers[slot];s.valid=true;s.minLinear=s.magLinear=s.mipLinear=true;
+        s.lodValid=true;s.minLevel=s.maxLevel=0;s.address.fill(slot==3?0:2);s.anisotropy=(slot==1 || slot==2)?16:1;
+    }
+    unsigned checks=0;
+    for(auto extent:{std::array<uint32_t,2>{128,72},{256,144}}) {
+        draw.viewport={0,0,extent[0],extent[1]};draw.targets={3301+extent[0],0,0,0,0};
+        WorldClear clear;clear.viewport=draw.viewport;clear.targets=draw.targets;clear.flags=1;
+        for(unsigned which=0;which<4;++which) {
+            auto nibble=[](char c) {return unsigned(c>='a'?c-'a'+10:c-'0');};
+            for(unsigned row=0;row<8;++row)for(unsigned lane=0;lane<4;++lane) {
+                const auto* hex=captured[which]+(row*4+lane)*8;
+                uint32_t bits=0;for(unsigned b=0;b<4;++b)bits|=(nibble(hex[b*2])*16+nibble(hex[b*2+1]))<<(b*8);
+                draw.fragmentConstants[row][lane]=std::bit_cast<float>(bits);
+            }
+            require(std::isnan(draw.fragmentConstants[6][2]) && std::isnan(draw.fragmentConstants[6][3]),
+                "Captured unused env6 NaNs lost");
+            renderer.clear(clear);require(renderer.draw(draw),"Captured voice shader fixture rejected");
+            const auto pixels=renderer.readSurface(draw.targets[0],false);
+            require(pixels.size()==size_t(extent[0])*extent[1]*8,"Captured voice shader extent changed");
+            const auto& c1=draw.fragmentConstants[1];const auto& c4=draw.fragmentConstants[4];
+            const auto& c5=draw.fragmentConstants[5];const auto& c7=draw.fragmentConstants[7];
+            std::array<double,4> effect{};
+            double invertedGray=0,totalAffection=0;
+            for(unsigned c=0;c<3;++c) {
+                const double value=sceneColor[c]/255.0;
+                invertedGray+=(1-value*value)*c4[c];totalAffection+=c4[c];
+            }
+            for(unsigned c=0;c<3;++c) {
+                const double value=sceneColor[c]/255.0;
+                const double gray=c4[3]*invertedGray+(1-c4[3])*(1-value*value);
+                effect[c]=(totalAffection-gray)*c5[c]+1-c1[3];
+            }
+            const double alpha=sceneColor[3]/255.0;
+            // DP3 r1.rgb leaves r1.w from the second scene fetch intact.
+            effect[3]=(c4[3]*alpha+(1-c4[3])*(1-alpha))*c5[3]-c1[2];
+            for(unsigned y=0;y<extent[1];++y)for(unsigned x=0;x<extent[0];++x) {
+                const double u=(x+.5)/extent[0],v=(y+.5)/extent[1];
+                const double t1=sample(mask0,u,v,false),t2=sample(mask1,u,v,false);
+                const double t3=sample(noise,(u-.5)*c7[3],(v-.5)*c7[3],true);
+                const double mask=t3*t1+(1-t3)*t2;
+                uint16_t rgba[4];std::memcpy(rgba,pixels.data()+(size_t(y)*extent[0]+x)*8,8);
+                for(unsigned c=0;c<4;++c) {
+                    const double expected=mask*effect[c]+1-mask,actual=half(rgba[c]);
+                    if(!std::isfinite(actual) || std::abs(actual-expected)>=.004) {
+                        std::fprintf(stderr,"CapturedVoice case=%u pixel=%u,%u lane=%u actual=%g expected=%g mask=%g\n",
+                            which,x,y,c,actual,expected,mask);
+                        throw std::runtime_error("Captured voice differs from original ARB formula");
+                    }
+                    if(c<3)require(actual>=1-c1[3]-.004,"Captured voice atlas became black");
+                    ++checks;
+                }
+            }
+        }
+    }
+    std::printf("CapturedVoice: %u ARB-formula checks with captured strengths, UV streams, clamp/wrap and unused NaNs.\n",checks);
+}
+
 // The voice effect composites eight scene samples and three independent masks.
 // Check actual GPU pixels across the whole output, including wide viewports.
 static void darknessEffectContract(WorldRendererD3D11& renderer) {
@@ -181,6 +297,7 @@ static void darknessEffectContract(WorldRendererD3D11& renderer) {
     }
     std::printf("DarknessEffect: %u quadrant scene/mask RGBA checks at square, ultrawide and 32:9 extents passed.\n",checks);
     darknessFixedCompositeContract(renderer);
+    capturedVoiceShaderContract(renderer);
 }
 
 // Retail RenderDeathScene0 (8235F390) clears descriptor+184/+186/+188,

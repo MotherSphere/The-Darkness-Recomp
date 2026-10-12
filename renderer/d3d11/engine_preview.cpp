@@ -316,7 +316,10 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
     Native::StallProfiler::Scope stallRender(Native::StallProfiler::Section::Rendering, "EnginePreviewD3D11::render");
     if(part.first==frameOpen_)throw std::logic_error("Preview frame parts are out of order");
     if(part.first) {
+    const auto previousTextureBudget=world_->textureBudget();
     world_->beginFrame();
+    if(world_->textureBudget()!=previousTextureBudget)
+        Native::setPreviewTextureBudget(world_->textureBudget());
     if(inspectionPending_) {world_->inspectNextFrame();inspectionPending_=false;}
     worldPresented_=false;
     calibrationDirty_=true;

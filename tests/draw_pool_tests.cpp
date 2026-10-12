@@ -6,6 +6,7 @@
 #include <exception>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 using namespace DarkRecomp::Native;
 using DarkRecomp::ColorImage;
@@ -43,6 +44,56 @@ int main() {
         const auto encoded=encodeEngineVertexDescriptor(binding.descriptor);
         for(unsigned i=0;i<5;++i)binding.key[i+1]=uint32_t(encoded[i*4])<<24|uint32_t(encoded[i*4+1])<<16|
             uint32_t(encoded[i*4+2])<<8|encoded[i*4+3];
+        {
+            auto vertices=std::make_shared<StoredGeometry>();
+            auto indices=std::make_shared<StoredGeometry>();
+            vertices->id=41;indices->id=42;
+            StoredDraw input{vertices,indices,1,2};input.vertexBindings=binding;
+            auto copied=captureWorldDraw(base,input);
+            require(copied && input.vertices==vertices && input.indices==indices &&
+                    copied->geometry.vertices==vertices && copied->geometry.indices==indices &&
+                    input.firstIndex==1 && input.indexCount==2 && input.vertexBindings->key==binding.key,
+                    "Const capture consumed or changed its input");
+            // Reject after vertex preparation and guest state capture, before
+            // publishing geometry. Even a late failure must preserve ownership.
+            put(base,context+17160,0);
+            auto rejected=captureWorldDraw(base,std::move(input));
+            put(base,context+17160,1280);
+            require(!rejected && input.vertices==vertices && input.indices==indices &&
+                    input.firstIndex==1 && input.indexCount==2 && input.vertexBindings->key==binding.key,
+                    "Rejected owned capture consumed or changed its input");
+            const std::weak_ptr<const StoredGeometry> weakVertices=vertices,weakIndices=indices;
+            auto transferred=captureWorldDraw(base,std::move(input));
+            require(transferred && !input.vertices && !input.indices &&
+                    transferred->geometry.vertices==vertices && transferred->geometry.indices==indices &&
+                    transferred->geometry.firstIndex==1 && transferred->geometry.indexCount==2 &&
+                    input.firstIndex==1 && input.indexCount==2 && input.vertexBindings->key==binding.key,
+                    "Successful owned capture did not transfer exactly its geometry references");
+            copied.reset();vertices.reset();indices.reset();
+            require(!weakVertices.expired() && !weakIndices.expired(),"Transferred draw lost its geometry");
+            transferred.reset();
+            require(weakVertices.expired() && weakIndices.expired(),"Released transferred draw pinned its geometry");
+        }
+        {
+            enableEnginePreview();
+            auto geometry=std::make_shared<StoredGeometry>();
+            geometry->vertexCount=3;geometry->vertices.resize(36);geometry->indices={0,1,2};
+            StoredDraw input{geometry,geometry,0,3};input.vertexBindings=binding;
+            put(base,context+17160,0);
+            previewObserveWorld(base,std::move(input));
+            put(base,context+17160,1280);
+            require(input.vertices==geometry && input.indices==geometry,"Rejected owned preview consumed its input");
+            const std::weak_ptr<const StoredGeometry> weak=geometry;
+            previewObserveWorld(base,std::move(input));
+            require(!input.vertices && !input.indices,"Owned preview did not transfer its geometry");
+            geometry.reset();previewEndFrame();
+            std::vector<DarkRecomp::SimpleMesh> frame;
+            require(takePreviewFrame(frame) && frame.size()==1 && frame[0].world &&
+                    frame[0].world->geometry.indexCount==3 && !weak.expired(),
+                    "Queued transferred draw lost its geometry");
+            frame.clear();
+            require(weak.expired(),"Preview accounting pinned transferred geometry after release");
+        }
         for(unsigned round=0;round<3;++round) {
             std::array<std::vector<HeldDraw>,8> held;
             std::array<std::exception_ptr,8> errors{};
@@ -58,11 +109,13 @@ int main() {
                         StoredDraw input{geometry,geometry,0,3};input.vertexBindings=binding;
                         if(i%31==0) {
                             input.vertexBindings->deviceAddress=0;
-                            require(!captureWorldDraw(base,input),"Invalid capture was published");
+                            require(!captureWorldDraw(base,std::move(input)) && input.vertices==geometry &&
+                                    input.indices==geometry,"Invalid owned capture consumed its input or was published");
                             input.vertexBindings=binding;
                         }
-                        auto draw=captureWorldDraw(base,input);
-                        require(draw && draw->geometry.vertices==geometry && draw->geometry.indices==geometry,
+                        auto draw=captureWorldDraw(base,std::move(input));
+                        require(draw && !input.vertices && !input.indices &&
+                                draw->geometry.vertices==geometry && draw->geometry.indices==geometry,
                                 "Capture changed geometry ownership");
                         require(draw->constants.vectors[255][0]==0 && draw->fragmentConstants[15][0]==0 &&
                                 !draw->textureObjects[15].object && !draw->textureIds[15] && !draw->samplers[15].lodValid &&

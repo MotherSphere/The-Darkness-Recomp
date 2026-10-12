@@ -14,6 +14,7 @@
 #include <intrin.h>
 #include <tmmintrin.h>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace DarkRecomp::Native {
@@ -931,7 +932,6 @@ static bool snapshotWorldDrawInto(uint8_t* base,const StoredDraw& geometry,World
     try {
         if (!geometry || !geometry.vertexBindings || !geometry.vertexBindings->deviceAddress ||
             uint64_t(geometry.vertexBindings->deviceAddress)+12600>0x100000000ull) return fail(1);
-        result.geometry={geometry.vertices,geometry.indices,geometry.firstIndex,geometry.indexCount};
         if (!prepareWorldVertexProgramInto(*geometry.vertexBindings,result.options,result.constants)) {
             // Strict full-palette validation failed. Retry once with a
             // geometry-aware proof that only proven-unread rows may be
@@ -1120,12 +1120,29 @@ static bool snapshotWorldDrawInto(uint8_t* base,const StoredDraw& geometry,World
 bool snapshotWorldDraw(uint8_t* base,const StoredDraw& geometry,WorldDraw& output) noexcept {
     WorldDraw result;
     if(!snapshotWorldDrawInto(base,geometry,result))return false;
+    result.geometry={geometry.vertices,geometry.indices,geometry.firstIndex,geometry.indexCount};
     output=std::move(result);return true;
 }
 std::shared_ptr<WorldDraw> captureWorldDraw(uint8_t* base,const StoredDraw& geometry) noexcept {
     try {
         auto result=acquireWorldDraw();
-        if(snapshotWorldDrawInto(base,geometry,*result))return result;
+        if(snapshotWorldDrawInto(base,geometry,*result)) {
+            result->geometry={geometry.vertices,geometry.indices,geometry.firstIndex,geometry.indexCount};
+            return result;
+        }
+    }catch(...){}
+    return {};
+}
+std::shared_ptr<WorldDraw> captureWorldDraw(uint8_t* base,StoredDraw&& geometry) noexcept {
+    try {
+        auto result=acquireWorldDraw();
+        if(snapshotWorldDrawInto(base,geometry,*result)) {
+            // Guest validation is complete. Failed captures retain the caller's
+            // references; successful captures transfer their ownership once.
+            result->geometry={std::move(geometry.vertices),std::move(geometry.indices),
+                              geometry.firstIndex,geometry.indexCount};
+            return result;
+        }
     }catch(...){}
     return {};
 }

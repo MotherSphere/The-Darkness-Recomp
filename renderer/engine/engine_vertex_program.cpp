@@ -200,12 +200,12 @@ static bool snapshotEngineVertexBindingsInto(uint8_t* base, EngineVertexBindingS
     ++bindingsCaptured; return true;
 }
 bool snapshotEngineVertexBindings(uint8_t* base,EngineVertexBindingSnapshot& output) noexcept {
-    EngineVertexBindingSnapshot result;
+    EngineVertexBindingSnapshot result(EngineVertexBindingSnapshot::captureStorage());
     if(!snapshotEngineVertexBindingsInto(base,result))return false;
     output=result;return true;
 }
 bool captureEngineVertexBindings(uint8_t* base,std::optional<EngineVertexBindingSnapshot>& output) noexcept {
-    if(snapshotEngineVertexBindingsInto(base,output.emplace()))return true;
+    if(snapshotEngineVertexBindingsInto(base,output.emplace(EngineVertexBindingSnapshot::captureStorage())))return true;
     output.reset();return false;
 }
 // Retain the completed original selection directly during ordinary rendering.

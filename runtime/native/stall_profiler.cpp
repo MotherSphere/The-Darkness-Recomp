@@ -75,6 +75,7 @@ std::atomic_flag stopping = ATOMIC_FLAG_INIT;
 struct Local {
     Buffer* buffer = nullptr;
     bool attempted = false;
+    uint32_t version = 0;
     Scope* scope = nullptr;
     uint64_t frameStart = 0, serial = 0;
     std::array<Totals, threadLimit> previous{};
@@ -91,11 +92,26 @@ Buffer* getBuffer() noexcept {
     const auto tid = GetCurrentThreadId();
     for (auto& buffer : buffers) {
         uint32_t empty = 0;
-        if (buffer.owner.compare_exchange_strong(empty, tid, std::memory_order_relaxed))
+        if (buffer.owner.compare_exchange_strong(empty, tid, std::memory_order_relaxed)) {
+            local.version = buffer.version.load(std::memory_order_relaxed);
             return local.buffer = &buffer;
+        }
     }
     unregistered.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
+}
+void beginUpdate(Buffer& buffer) noexcept {
+    // Each registered buffer has one writer. Cache its sequence in TLS so
+    // scope transitions do not require locked read-modify-write operations.
+    buffer.version.store(++local.version, std::memory_order_relaxed);
+    // The release fence is after the odd publication. If a reader observes
+    // any following relaxed payload store, its acquire fence orders this odd
+    // version before the reader's final check, rejecting that torn snapshot.
+    std::atomic_thread_fence(std::memory_order_release);
+}
+void endUpdate(Buffer& buffer) noexcept {
+    // A reader that starts at this even version acquires the entire update.
+    buffer.version.store(++local.version, std::memory_order_release);
 }
 void charge(Buffer& buffer, uint64_t time) noexcept {
     const auto category = buffer.section.load(std::memory_order_relaxed);
@@ -312,7 +328,7 @@ void Scope::begin(Section section, const char* function, uint32_t pc,
     guestPc_ = pc ? pc : parent_ ? parent_->guestPc_ : 0;
     caller_ = caller ? caller : parent_ ? parent_->caller_ : 0;
     start_ = now();
-    buffer->version.fetch_add(1, std::memory_order_acq_rel);
+    beginUpdate(*buffer);
     charge(*buffer, start_);
     buffer->section.store(int(section_), std::memory_order_relaxed);
     buffer->callBegin.store(start_, std::memory_order_relaxed);
@@ -322,12 +338,12 @@ void Scope::begin(Section section, const char* function, uint32_t pc,
     buffer->pc.store(guestPc_, std::memory_order_relaxed);
     buffer->caller.store(caller_, std::memory_order_relaxed);
     local.scope = this;
-    buffer->version.fetch_add(1, std::memory_order_release);
+    endUpdate(*buffer);
 }
 void Scope::end() noexcept {
     auto& buffer = *static_cast<Buffer*>(buffer_);
     const auto end = now(), elapsed = end - start_;
-    buffer.version.fetch_add(1, std::memory_order_acq_rel);
+    beginUpdate(buffer);
     charge(buffer, end);
     buffer.section.store(parent_ ? int(parent_->section_) : -1, std::memory_order_relaxed);
     buffer.callBegin.store(parent_ ? parent_->start_ : 0, std::memory_order_relaxed);
@@ -338,7 +354,7 @@ void Scope::end() noexcept {
     buffer.caller.store(parent_ ? parent_->caller_ : 0, std::memory_order_relaxed);
     local.scope = parent_;
     if (parent_) parent_->children_ += elapsed;
-    buffer.version.fetch_add(1, std::memory_order_release);
+    endUpdate(buffer);
     if (elapsed > callThreshold) {
         Event event{start_, end, elapsed >= children_ ? elapsed - children_ : 0, object_,
             function_, objectKind_, buffer.owner.load(std::memory_order_relaxed), guestPc_, caller_, section_};
