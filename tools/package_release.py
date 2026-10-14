@@ -137,6 +137,7 @@ def package_diagnostics(root: Path, output: Path, version: str, revision: str) -
         'The newest build_native/run/desktop-*/runtime.log contains\r\n'
         '[STALL] and [WAIT] timing reports. Profiling only affects this run.\r\n\r\n'
         'LaunchShadowCapture.cmd: play with shadow capture enabled.\r\n'
+        'Press F8 during gameplay to capture a frame (up to two captures).\r\n'
         'Capture files are written under build_native/run.\r\n\r\n'
         'Use Launch.cmd for ordinary play. Share diagnostic logs when\r\n'
         'reporting issues; do not upload game files or private saves.\r\n'

@@ -154,6 +154,7 @@ class ReleaseTests(unittest.TestCase):
             instructions = bundle.read('DIAGNOSTICS_README.txt').decode('utf-8')
             self.assertIn('The-Darkness-Recomp-v0.1.1-windows-x64.zip', instructions)
             self.assertIn('beside Launch.cmd', instructions)
+            self.assertIn('Press F8 during gameplay', instructions)
             manifest = json.loads(bundle.read('DIAGNOSTICS.json'))
             self.assertEqual(manifest['version'], 'v0.1.1')
             self.assertEqual(manifest['commit'], 'abc123')
