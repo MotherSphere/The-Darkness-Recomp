@@ -34,11 +34,13 @@
 namespace DarkRecomp::Native {
 namespace {
 thread_local PromptRenderContext promptRenderContext = PromptRenderContext::Menu;
+thread_local bool subtitleRenderContext = false;
 struct PromptContextFrame {
     uint8_t* base = nullptr;
     uint32_t manager = 0;
     uint64_t generation = 0;
     std::unordered_set<uint32_t> gameplayDraws;
+    std::unordered_set<uint32_t> subtitleDraws;
 };
 constexpr size_t promptManagerLimit = 16, promptDrawLimit = 4096;
 std::array<PromptContextFrame, promptManagerLimit> promptContextFrames;
@@ -232,6 +234,7 @@ void resetQueuedPromptContexts(uint8_t* base, uint32_t manager) noexcept {
         }
         if (!frame) return;
         frame->gameplayDraws.clear();
+        frame->subtitleDraws.clear();
         frame->base = base;
         frame->manager = manager;
         frame->generation = promptContextGeneration < UINT64_MAX ? ++promptContextGeneration : 0;
@@ -242,6 +245,7 @@ void retireQueuedPromptContexts() noexcept {
         std::lock_guard lock(promptContextMutex);
         for (auto& frame : promptContextFrames) {
             frame.gameplayDraws.clear();
+            frame.subtitleDraws.clear();
             frame.base = nullptr;
             frame.manager = 0;
             frame.generation = 0;
@@ -254,6 +258,7 @@ void retireQueuedPromptContexts(uint8_t* base, uint32_t manager) noexcept {
         std::lock_guard lock(promptContextMutex);
         if (auto* frame = findPromptContextFrame(base, manager)) {
             frame->gameplayDraws.clear();
+            frame->subtitleDraws.clear();
             frame->base = nullptr;
             frame->manager = 0;
             frame->generation = 0;
@@ -275,8 +280,10 @@ void forgetQueuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw, u
     if (!base || !manager || !draw || !generation) return;
     try {
         std::lock_guard lock(promptContextMutex);
-        if (auto* frame = findPromptContextFrame(base, manager); frame && frame->generation == generation)
+        if (auto* frame = findPromptContextFrame(base, manager); frame && frame->generation == generation) {
             frame->gameplayDraws.erase(draw);
+            frame->subtitleDraws.erase(draw);
+        }
     } catch (...) {}
 }
 void recordQueuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw, PromptRenderContext context) noexcept {
@@ -305,6 +312,32 @@ PromptRenderContext queuedPromptContext(uint8_t* base, uint32_t manager, uint32_
             return PromptRenderContext::Gameplay;
     } catch (...) {}
     return PromptRenderContext::Menu;
+}
+
+bool currentSubtitleRenderContext() noexcept { return subtitleRenderContext; }
+bool setSubtitleRenderContext(bool subtitle) noexcept {
+    return std::exchange(subtitleRenderContext, subtitle);
+}
+void recordQueuedSubtitleContext(uint8_t* base, uint32_t manager, uint32_t draw,
+                                 bool subtitle, uint64_t generation) noexcept {
+    if (!base || !manager || !draw || (draw & 3) || !generation) return;
+    try {
+        std::lock_guard lock(promptContextMutex);
+        if (auto* frame = findPromptContextFrame(base, manager); frame && frame->generation == generation) {
+            frame->subtitleDraws.erase(draw);
+            if (subtitle && frame->subtitleDraws.size() < promptDrawLimit)
+                frame->subtitleDraws.insert(draw);
+        }
+    } catch (...) {}
+}
+bool queuedSubtitleContext(uint8_t* base, uint32_t manager, uint32_t draw, uint64_t generation) noexcept {
+    if (!base || !manager || !draw || (draw & 3) || !generation) return false;
+    try {
+        std::lock_guard lock(promptContextMutex);
+        if (const auto* frame = findPromptContextFrame(base, manager);
+            frame && frame->generation == generation) return frame->subtitleDraws.contains(draw);
+    } catch (...) {}
+    return false;
 }
 
 bool copyRenderMemory(uint8_t* base, uint64_t address, void* output, size_t size) {
@@ -851,6 +884,20 @@ void previewObserveImage(uint8_t* base, uint32_t address, uint32_t id, uint32_t 
     if (TextureUploadTraceEnabled())
         std::printf("[EnginePreview] Copied original alpha texture id=%u size=%ux%u\n", id, image->width, image->height);
 }
+std::shared_ptr<const AlphaImage> previewAlphaImageForSubtitleFont(uint32_t id) noexcept {
+    try {
+        std::lock_guard lock(queueMutex);
+        const auto found = textures.find(id);
+        return found == textures.end() ? nullptr : found->second;
+    } catch (...) { return {}; }
+}
+std::shared_ptr<const ColorImage> previewColorImageForSubtitleFont(uint32_t id) noexcept {
+    try {
+        std::lock_guard lock(queueMutex);
+        const auto found = colorTextures.find(id);
+        return found == colorTextures.end() ? nullptr : found->second.image;
+    } catch (...) { return {}; }
+}
 const char* decodeUploadImage(uint8_t* base,uint32_t address,uint32_t pixels,ColorImage& result) {
     uint8_t header[48]{};
     if (!copyRenderMemory(base,address,header,sizeof(header))) return "unreadable upload CImage";
@@ -1014,6 +1061,7 @@ static bool submitTriangles(uint8_t* base, uint32_t indices, uint32_t triangles)
     mesh.colorTexture = colorTexture;
     mesh.textureId = u16(attributes + 8);
     mesh.opaque = opaqueMaterial;
+    mesh.subtitle = currentSubtitleRenderContext();
     std::unique_lock lock(queueMutex);
     const size_t videoBytes = video ? video->luma.size() + video->chroma.size() : 0;
     auto newColorBytes = colorTexture && std::none_of(pending.begin(), pending.end(),

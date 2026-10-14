@@ -52,7 +52,8 @@ set(DARK_MENU_TEXT_HEADER "${CMAKE_BINARY_DIR}/native_assets/native_menu_text.ge
 add_custom_command(OUTPUT "${DARK_MENU_TEXT_HEADER}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/compile_native_menu_text.py"
         --catalog "${CMAKE_SOURCE_DIR}/assets/localization/native_menu_ru.json" --output "${DARK_MENU_TEXT_HEADER}"
-    DEPENDS tools/compile_native_menu_text.py assets/localization/native_menu_ru.json VERBATIM)
+    DEPENDS tools/compile_native_menu_text.py assets/localization/native_menu_ru.json
+        assets/localization/subtitle_menu.json VERBATIM)
 add_custom_target(NativeMenuText DEPENDS "${DARK_MENU_TEXT_HEADER}")
 function(add_native_menu_text target)
     target_sources(${target} PRIVATE runtime/native/native_menu_text.cpp)
@@ -87,8 +88,8 @@ target_sources(DarkRuntime PRIVATE renderer/engine/engine_palette.cpp)
 target_sources(DarkRuntime PRIVATE renderer/engine/engine_vertex_program.cpp)
 set_source_files_properties(renderer/engine/engine_transforms.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 target_sources(DarkRuntime PRIVATE renderer/engine/simple_mesh.cpp renderer/d3d11/engine_preview.cpp
-  renderer/d3d11/smaa_d3d11.cpp renderer/d3d11/msaa_depth_transfer.cpp)
-target_link_libraries(DarkRuntime PUBLIC d3dcompiler)
+  renderer/d3d11/smaa_d3d11.cpp renderer/d3d11/msaa_depth_transfer.cpp renderer/engine/subtitle_font.cpp)
+target_link_libraries(DarkRuntime PUBLIC d3dcompiler dwrite gdi32)
 set(DARK_SHADER_DIR "${CMAKE_BINARY_DIR}/native_shaders")
 add_custom_command(OUTPUT "${DARK_SHADER_DIR}/engine_vertex_template.generated.h"
     "${DARK_SHADER_DIR}/engine_vertex_template.hlsl" "${DARK_SHADER_DIR}/engine_vertex_template.source.json"
@@ -408,6 +409,9 @@ if(BUILD_TESTING)
     set_tests_properties(WorldTextureBudgetRecoveryContract WorldTextureBudgetRecoveryWarpContract PROPERTIES TIMEOUT 120)
     add_test(NAME WorldGuiFadeContract COMMAND WorldRendererTests --gui-fade-only)
     add_test(NAME WorldGuiFadeWarpContract COMMAND WorldRendererTests --warp --gui-fade-only)
+    add_test(NAME SubtitleFontContract COMMAND WorldRendererTests --subtitle-font-only)
+    add_test(NAME SubtitleFontWarpContract COMMAND WorldRendererTests --warp --subtitle-font-only)
+    set_tests_properties(SubtitleFontContract SubtitleFontWarpContract PROPERTIES TIMEOUT 60)
     add_test(NAME WorldBloomResolutionContract COMMAND WorldRendererTests --bloom-only)
     add_test(NAME WorldBloomResolutionWarpContract COMMAND WorldRendererTests --warp --bloom-only)
     set_tests_properties(WorldBloomResolutionContract WorldBloomResolutionWarpContract PROPERTIES TIMEOUT 60)
@@ -526,6 +530,8 @@ if(BUILD_TESTING)
     set_tests_properties(NativeTitleTextShadowContract PROPERTIES TIMEOUT 30)
     add_test(NAME NativeTitleTextHeadingContract COMMAND NativeTests "${CMAKE_SOURCE_DIR}/Darkness" --title-text-heading)
     set_tests_properties(NativeTitleTextHeadingContract PROPERTIES TIMEOUT 30)
+    add_test(NAME NativeSubtitleScaleContract COMMAND NativeTests "${CMAKE_SOURCE_DIR}/Darkness" --subtitle-scale)
+    set_tests_properties(NativeSubtitleScaleContract PROPERTIES TIMEOUT 30)
     add_test(NAME NativeTextureMipContract COMMAND NativeTests "${CMAKE_SOURCE_DIR}/Darkness" --texture-mip-layout)
     add_test(NAME NativeTextureUploadContract COMMAND NativeTests "${CMAKE_SOURCE_DIR}/Darkness" --texture-upload)
     add_test(NAME NativeTexturePreloadContract COMMAND NativeTests "${CMAKE_SOURCE_DIR}/Darkness" --texture-preload)

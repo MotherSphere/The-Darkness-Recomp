@@ -126,6 +126,31 @@ int main() {
                   !saveDisplaySettings(path, 90, invalid) && loadGraphicsSettings(path) == custom,
                   "invalid anisotropic filtering partially applied settings");
         }
+        check(GraphicsSettings{}.subtitleScalePercent == 100, "subtitles must default to the original size");
+        for (unsigned scale : {50u, 73u, 90u, 100u, 110u, 137u, 150u, 200u}) {
+            auto selected = custom; selected.subtitleScalePercent = scale;
+            check(setGraphicsSettings(selected) && graphicsSettings() == selected,
+                  "subtitle scale packing changed another preference");
+            check(saveDisplaySettings(path, 93.125f, selected) && loadGraphicsSettings(path) == selected &&
+                  loadFieldOfView(path) == 93.125f, "subtitle scale did not persist independently");
+            wchar_t savedScale[16]{};
+            GetPrivateProfileStringW(L"Display", L"SubtitleScalePercent", L"missing", savedScale, 16, path.c_str());
+            check(std::wstring_view(savedScale) == std::to_wstring(scale), "subtitle scale did not save its percentage");
+        }
+        check(WritePrivateProfileStringW(L"Display", L"SubtitleScalePercent", nullptr, path.c_str()),
+              "remove subtitle scale for legacy settings");
+        check(loadGraphicsSettings(path) == custom, "legacy settings must preserve original subtitle size");
+        for (const auto bad : {L"0", L"49", L"201", L"-1", L"150%", L"1.50", L"42949672960"}) {
+            WritePrivateProfileStringW(L"Display", L"SubtitleScalePercent", bad, path.c_str());
+            check(loadGraphicsSettings(path) == custom, "invalid subtitle scale changed another preference");
+        }
+        check(saveDisplaySettings(path, 93.125f, custom) && setGraphicsSettings(custom), "restore original subtitle size");
+        for (unsigned scale : {0u, 49u, 201u, 256u, 0xffffffffu}) {
+            auto invalid = custom; invalid.subtitleScalePercent = scale;
+            check(!validGraphicsSettings(invalid) && !setGraphicsSettings(invalid) && graphicsSettings() == custom &&
+                  !saveDisplaySettings(path, 90, invalid) && loadGraphicsSettings(path) == custom &&
+                  loadFieldOfView(path) == 93.125f, "invalid subtitle scale partially applied settings");
+        }
         // The retired native power curve has no mapping to the original
         // profile's gamma calibration. Loading ignores its key without
         // rewriting the file; unrelated saves preserve the inert value.

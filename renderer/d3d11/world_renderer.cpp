@@ -7,6 +7,7 @@
 #include "runtime/native/graphics_settings.h"
 #include "renderer/engine/prompt_icons.h"
 #include "renderer/engine/prompt_layout.h"
+#include "renderer/engine/subtitle_font.h"
 #include "renderer/engine/engine_performance.h"
 #include "renderer/engine/render_trace.h"
 #include <d3d11shader.h>
@@ -613,11 +614,15 @@ ID3D11ShaderResourceView* WorldRendererD3D11::image(const std::shared_ptr<const 
     Image result;result.source=source;result.used=speculative?0:++resourceUse_;
     for(unsigned mip=0;mip<desc.MipLevels;++mip)
         result.bytes+=size_t((std::max)(1u,source->width>>mip))*(std::max)(1u,source->height>>mip)*source->faces*4;
+    if(source->generatedSubtitleFont && result.bytes>imageBudget_)return nullptr;
     if(speculative && (imageBytes_>imageBudget_ || result.bytes>imageBudget_-imageBytes_))return nullptr;
-    while(!images_.empty() && imageBytes_+result.bytes>imageBudget_) {
-        auto oldest=std::min_element(images_.begin(),images_.end(),[](const auto& l,const auto& r){return l.second.used<r.second.used;});
-        imageBytes_-=oldest->second.bytes;images_.erase(oldest);
-    }
+    auto makeRoom=[&] {
+        while(!images_.empty() && imageBytes_+result.bytes>imageBudget_) {
+            auto oldest=std::min_element(images_.begin(),images_.end(),[](const auto& l,const auto& r){return l.second.used<r.second.used;});
+            imageBytes_-=oldest->second.bytes;images_.erase(oldest);
+        }
+    };
+    if(!source->generatedSubtitleFont)makeRoom();
     Ptr<ID3D11Texture2D> texture;
     if(source->authoredMips && source->firstMip==0) {
         // Owned authored levels are complete and never written after upload.
@@ -645,6 +650,7 @@ ID3D11ShaderResourceView* WorldRendererD3D11::image(const std::shared_ptr<const 
     }
     check(device_->CreateShaderResourceView(texture.Get(),nullptr,&result.view),"world image view");
     if(!source->authoredMips)context_->GenerateMips(result.view.Get());
+    if(source->generatedSubtitleFont)makeRoom();
     const auto cached=images_.emplace(source.get(),std::move(result)).first;
     imageBytes_+=cached->second.bytes;++imageUploads_;
     noteWorstUpload(millisBetween(imageStart,std::chrono::steady_clock::now()),cached->second.bytes,"image");
@@ -1615,7 +1621,33 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
             // that chain rather than the original texture's resident LODs.
             std::shared_ptr<const ColorImage> effective = draw.textures[slot];
             bool promptSubstituted = false;
-            if (promptKeyboardMouse_ && effective && effective->faces == 1 && !cube && effective->promptOrigin) {
+            bool subtitleSubstituted = false;
+            ID3D11SamplerState* subtitleSampler = nullptr;
+            if(draw.subtitle && slot==0 && effective && !cube &&
+               draw.material==Native::WorldMaterial::fixed && fragmentName=="MRenderXenon_Attrib_TexEnvMode01") {
+                const auto height=subtitleRenderHeight_?subtitleRenderHeight_:draw.viewport[3]*scale_;
+                const auto factor=Native::subtitleFontRasterScale(height,Native::graphicsSettings().subtitleScalePercent);
+                const bool failed=std::any_of(failedSubtitles_.begin(),failedSubtitles_.end(),
+                    [&](const auto& entry){return entry.factor==factor && entry.source.lock()==effective;});
+                if(!failed)if(auto replacement=Native::subtitleFontReplacementFor(draw.textureIds[slot],effective,factor)) {
+                    try {
+                        Native::WorldSampler fontSampler;
+                        fontSampler.valid=true;fontSampler.minLinear=fontSampler.magLinear=true;
+                        fontSampler.address.fill(2);fontSampler.anisotropy=1;
+                        fontSampler.minLevel=fontSampler.maxLevel=0;fontSampler.baseOnly=true;
+                        subtitleSampler=sampler(fontSampler);
+                        if(auto* view=image(replacement)) {
+                            views[slot]=view;effective=std::move(replacement);subtitleSubstituted=true;
+                        }
+                    } catch(const std::exception&) {} // Optional font resources may retain the original bitmap.
+                    if(!subtitleSubstituted) {
+                        failedSubtitles_[failedSubtitleNext_++%failedSubtitles_.size()]={effective,factor};
+                        std::fprintf(stderr,"[SubtitleFont] GPU atlas unavailable id=%u factor=%u; retaining original\n",
+                            draw.textureIds[slot],factor);
+                    }
+                }
+            }
+            if (!subtitleSubstituted && promptKeyboardMouse_ && effective && effective->faces == 1 && !cube && effective->promptOrigin) {
                 if (auto icon = Prompts::replacementFor(draw.textureIds[slot], effective,
                         Prompts::Source::KeyboardMouse, draw.promptContext == Native::PromptRenderContext::Gameplay ?
                             Prompts::Context::Gameplay : Prompts::Context::Menu)) {
@@ -1629,16 +1661,18 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
                             unsigned(draw.textures[slot]->promptOrigin));
                 }
             }
-            if(!effective || effective->faces!=(cube?6u:1u) || !(views[slot]=image(effective))) {
+            if(!effective || effective->faces!=(cube?6u:1u) || (!views[slot] && !(views[slot]=image(effective)))) {
                 static std::set<uint32_t> missing;
                 if(missing.size()<64 && missing.insert(draw.textureIds[slot]).second) std::fprintf(stderr,"[EngineWorldMissingTexture] program=%s slot=%u id=%u object=%08X storage=%08X format=%u size=%ux%u faces=%u\n",
                     lastFragmentKey_.c_str(),slot,draw.textureIds[slot],texture.object,texture.storage,texture.format,texture.width,texture.height,texture.faces);
                 return rejected(3);
             }
-            if (promptSubstituted) {
+            if (promptSubstituted || subtitleSubstituted) {
                 firstMip = 0;
-                samplers[slot] = (cube || draw.material==Native::WorldMaterial::post ||
-                    draw.material==Native::WorldMaterial::fixed) ? cubeSampler_.Get() : wrapSampler_.Get();
+                if(subtitleSubstituted) {
+                    samplers[slot]=subtitleSampler;
+                } else samplers[slot]=(cube || draw.material==Native::WorldMaterial::post ||
+                    draw.material==Native::WorldMaterial::fixed)?cubeSampler_.Get():wrapSampler_.Get();
                 scales[slot].fill(std::exp2(float(texture.exponent)));
                 retainedViews[slot]=views[slot];retainedSamplers[slot]=samplers[slot];
                 continue;

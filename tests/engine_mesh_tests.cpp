@@ -25,6 +25,54 @@ extern "C" PPC_FUNC(__imp__sub_822478C0);
 extern "C" PPC_FUNC(__imp__sub_8223AFE8);
 extern "C" PPC_FUNC(__imp__sub_8224DAE0);
 static void require(bool result, const char* reason) { if (!result) throw std::runtime_error(reason); }
+static void testSubtitleContextLifetime() {
+    auto* base = reinterpret_cast<uint8_t*>(uintptr_t(0x1000));
+    constexpr uint32_t manager = 0x2000, draw = 0x3000;
+    retireQueuedPromptContexts();
+    struct Cleanup { ~Cleanup() { retireQueuedPromptContexts(); } } cleanup;
+    require(!currentSubtitleRenderContext(), "Subtitle scope leaked into the test entry");
+    {
+        ScopedSubtitleRenderContext subtitle(true);
+        require(currentSubtitleRenderContext(), "Subtitle producer scope was not enabled");
+        {
+            ScopedSubtitleRenderContext unrelated(false);
+            require(!currentSubtitleRenderContext(), "Nested unrelated text inherited subtitle ownership");
+        }
+        require(currentSubtitleRenderContext(), "Nested text failed to restore subtitle ownership");
+        require(std::async(std::launch::async, [] { return currentSubtitleRenderContext(); }).get() == false,
+                "Subtitle ownership crossed producer threads");
+    }
+    require(!currentSubtitleRenderContext(), "Subtitle ownership survived its producer scope");
+    recordQueuedSubtitleContext(base, manager, draw, true, 1);
+    require(!queuedSubtitleContext(base, manager, draw, 1), "Unknown manager accepted subtitle ownership");
+    resetQueuedPromptContexts(base, manager);
+    const auto generation = queuedPromptGeneration(base, manager);
+    require(generation != 0, "Subtitle manager frame has no generation");
+    recordQueuedSubtitleContext(base, manager, draw, true, generation);
+    require(queuedSubtitleContext(base, manager, draw, generation), "Deferred subtitle lost producer ownership");
+    recordQueuedPromptContext(base, manager, draw, PromptRenderContext::Menu, generation);
+    require(queuedSubtitleContext(base, manager, draw, generation), "Menu icon context cleared subtitle ownership");
+    recordQueuedSubtitleContext(base, manager, draw, false, generation);
+    require(!queuedSubtitleContext(base, manager, draw, generation), "Unrelated re-enqueue inherited subtitle ownership");
+    recordQueuedSubtitleContext(base, manager, draw, true, generation);
+    forgetQueuedPromptContext(base, manager, draw, generation);
+    require(!queuedSubtitleContext(base, manager, draw, generation), "Reallocated VB retained subtitle ownership");
+    recordQueuedSubtitleContext(base, manager, draw, true, generation);
+    resetQueuedPromptContexts(base, manager);
+    const auto next = queuedPromptGeneration(base, manager);
+    require(next != generation && !queuedSubtitleContext(base, manager, draw, next),
+            "Reused manager frame retained subtitle ownership");
+    recordQueuedSubtitleContext(base, manager, draw, true, generation);
+    require(!queuedSubtitleContext(base, manager, draw, next), "Stale producer changed a new manager frame");
+    for (unsigned i = 0; i < 4096; ++i)
+        recordQueuedSubtitleContext(base, manager, 0x4000 + i * 4, true, next);
+    recordQueuedSubtitleContext(base, manager, 0x10000, true, next);
+    require(!queuedSubtitleContext(base, manager, 0x10000, next), "Subtitle metadata overflow marked an unknown VB");
+    recordQueuedSubtitleContext(base, manager, 0x4000, false, next);
+    require(!queuedSubtitleContext(base, manager, 0x4000, next), "Overflow prevented unrelated VB metadata clearing");
+    retireQueuedPromptContexts(base, manager);
+    require(!queuedSubtitleContext(base, manager, 0x4004, next), "Retired manager retained subtitle ownership");
+}
 static void testDecodedDrawRequest() {
     DecodedDrawRequest request;
     constexpr uint32_t caller = 0x8225E200;
@@ -1460,6 +1508,7 @@ int main(int argc, char** argv) {
     HWND window=nullptr;
     try {
         testDecodedDrawRequest();
+        testSubtitleContextLifetime();
         require(argc==2,"Game directory required for original AOT decoder comparison");
         // Match the executable's initialization, including linking the
         // strong engine observers out of DarkRuntime's static archive.

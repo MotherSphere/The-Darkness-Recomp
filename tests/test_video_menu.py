@@ -135,7 +135,7 @@ class VideoMenu(unittest.TestCase):
             self.assertEqual(before.encode(), raw)
             self.assertEqual(len(before.roots) + 5, len(after.roots))
             for original, edited in zip(before.roots, after.roots):
-                if before.decode(original)[1] not in ("options_video", "options_controller",
+                if before.decode(original)[1] not in ("options_video", "options_subtitles", "options_controller",
                         "MainMenu_NoCheckpoint", "MainMenu_GotCheckpoint", "GAMEMENU_real"):
                     self.assertEqual(tree(before, original), tree(after, edited))
 
@@ -160,6 +160,7 @@ class VideoMenu(unittest.TestCase):
             self.assertNotIn("darkrecomp.gamma", buttons)
             self.assertIn("darkrecomp.language", buttons)
             self.assertIn("darkrecomp.anisotropy", buttons)
+            self.assertNotIn("darkrecomp.subtitle_scale", buttons)
             self.assertEqual(buttons[:2], ["darkrecomp.brightness", "darkrecomp.fov"])
 
     def test_exit_confirmation_and_keyboard_entry_preserve_original_controls(self):
@@ -237,7 +238,7 @@ class VideoMenu(unittest.TestCase):
             originals = {before.decode(root)[1]: root for root in before.roots}
             for root in after.roots:
                 name = after.decode(root)[1]
-                if name not in ("options_video", "options_controller", "MainMenu_NoCheckpoint",
+                if name not in ("options_video", "options_subtitles", "options_controller", "MainMenu_NoCheckpoint",
                                 "MainMenu_GotCheckpoint", "GAMEMENU_real", "darkrecomp_exit_confirm") and not name.startswith("darkrecomp_keyboard_"):
                     continue
                 original_controls = [tree(before, n) for n in originals[name].children
@@ -354,7 +355,7 @@ class VideoMenu(unittest.TestCase):
                 self.assertEqual(fields, original_fields)
                 props = dict(after.decode(c) for c in new.children)
                 self.assertEqual(props["OPTION"], "OPTG\\VIDEO_GAMMA")
-                self.assertEqual(props["RGN"], "11,5,8,1")
+                self.assertEqual(props["RGN"], "11,4,8,1")
                 self.assertNotIn("SCRIPT_PRESSED", props)
             steps = dict(after.decode(c) for c in gamma[0].children)["STEPS"]
             self.assertEqual(steps[0], 5)
@@ -399,7 +400,7 @@ class VideoMenu(unittest.TestCase):
                     allowed_changes.add("STYLE")
                 self.assertEqual([field for field in fields if field[0] not in allowed_changes],
                                  [before.decode(c) for c in old.children if before.decode(c)[0] not in ("RGN", "GROUP")])
-                self.assertEqual(props["RGN"], "1,7,18,1")
+                self.assertEqual(props["RGN"], "1,6,18,1")
                 self.assertNotIn("SCRIPT_PRESSED", props)
             button, selected = [dict(after.decode(c) for c in n.children) for n in controls]
             self.assertEqual(button["OPTION"], "OPTG\\VIDEO_CABLEPROFILE")
@@ -417,7 +418,7 @@ class VideoMenu(unittest.TestCase):
             old_label, label = profile_label(before, source), profile_label(after, page)
             self.assertEqual([after.decode(c) for c in label.children if after.decode(c)[0] != "RGN"],
                              [before.decode(c) for c in old_label.children if before.decode(c)[0] != "RGN"])
-            self.assertEqual(dict(after.decode(c) for c in label.children)["RGN"], "1,6,18,1")
+            self.assertEqual(dict(after.decode(c) for c in label.children)["RGN"], "1,5,18,1")
 
     def test_language_selection_is_visible_with_restart_help(self):
         for registry, _ in registries(self.output):
@@ -426,12 +427,69 @@ class VideoMenu(unittest.TestCase):
                         for window in page.children if registry.decode(window)[0] == "WINDOW"]
             label, = [c for c in controls if c.get("TEXT") == "sc, LANGUAGE"]
             button, = [c for c in controls if c.get("SCRIPT_PRESSED") == "darkrecomp.language"]
-            self.assertEqual(label["RGN"], "1,16,10,1")
-            self.assertEqual(button["RGN"], "11,16,8,1")
+            self.assertEqual(label["RGN"], "1,15,10,1")
+            self.assertEqual(button["RGN"], "11,15,8,1")
             self.assertEqual(button["TEXT"], "sc, <    SYSTEM    >")
             self.assertEqual(button["CLASSNAME"], "CubeButton")
             self.assertEqual(button["ALWAYSPAINT"], "1")
             self.assertIn("sc, RESOLUTION/LANGUAGE: RESTART TO APPLY", [c.get("TEXT") for c in controls])
+
+    def test_subtitle_size_is_visible_and_keeps_the_original_value_button_width(self):
+        for registry, _ in registries(self.output):
+            page, = [n for n in registry.roots if registry.decode(n) == ("WINDOW", "options_subtitles")]
+            controls = [dict(registry.decode(c) for c in window.children)
+                        for window in page.children if registry.decode(window)[0] == "WINDOW"]
+            labels = [c for c in controls if c.get("TEXT") == "sc, SUBTITLE SIZE"]
+            buttons = [c for c in controls if c.get("SCRIPT_PRESSED") == "darkrecomp.subtitle_scale"]
+            self.assertEqual(len(labels), 1, "Subtitle Size must be in the subtitle menu")
+            self.assertEqual(len(buttons), 1, "Subtitle Size must be adjustable in the subtitle menu")
+            label, button = labels[0], buttons[0]
+            self.assertEqual(label["RGN"], "2,15,8,1")
+            self.assertEqual(label["ID"], "DARKRECOMP_SUBTITLE_SIZE")
+            self.assertEqual(label["ALWAYSPAINT"], "1")
+            self.assertEqual(button["RGN"], "11,15,8,1")
+            self.assertEqual(button["TEXT"], "sc, < " + "100%".center(12) + " >")
+            self.assertEqual(button["CLASSNAME"], "CubeButton")
+            self.assertEqual(button["ALWAYSPAINT"], "1")
+            self.assertNotIn("OPTION", button, "subtitle size must not change retail subtitle on/off")
+            self.assertNotIn("GROUP", button)
+            footer, = [c for c in controls if c.get("ID") == "DARKRECOMP_SUBTITLE_HELP"]
+            self.assertEqual(footer["ALWAYSPAINT"], "1")
+            self.assertEqual((footer["TEXT"], footer["RGN"]),
+                             ("sc, LEFT/RIGHT: CHANGE; CONFIRM: NEXT", "0,19,20,1"))
+            locations = [registry.decode(root)[1] for root in registry.roots
+                         for child in root.children for prop in child.children
+                         if registry.decode(prop) == ("SCRIPT_PRESSED", "darkrecomp.subtitle_scale")]
+            self.assertEqual(locations, ["options_subtitles"], "Subtitle Size must occur only once")
+
+    def test_subtitle_menu_retains_original_controls_and_focus_order(self):
+        for (before, _), (after, _) in zip(registries(self.source), registries(self.output)):
+            source, = [n for n in before.roots if before.decode(n) == ("WINDOW", "options_subtitles")]
+            page, = [n for n in after.roots if after.decode(n) == ("WINDOW", "options_subtitles")]
+            self.assertEqual([tree(before, child) for child in source.children],
+                             [tree(after, child) for child in page.children[:len(source.children)]])
+            added = [dict(after.decode(prop) for prop in child.children)
+                     for child in page.children[len(source.children):]]
+            self.assertEqual([c["CLASSNAME"] for c in added], ["CubeText", "CubeButton", "CubeText"])
+            controls = [dict(after.decode(prop) for prop in child.children)
+                        for child in page.children if after.decode(child)[0] == "WINDOW"]
+            focusable = [c for c in controls if c.get("CLASSNAME") in ("CubeOptionButton", "CubeButton")]
+            self.assertEqual([c.get("OPTION") for c in focusable[:-1]],
+                             ["OPT\\GAME_SUBTITLE_" + category for category in
+                              ("INTERACTIVE", "CUTSCENE", "CASUAL", "FIGHTING", "DARKNESS")])
+            self.assertEqual(focusable[-1]["SCRIPT_PRESSED"], "darkrecomp.subtitle_scale")
+            for control in added:
+                x, y, width, height = map(int, control["RGN"].split(","))
+                self.assertGreater(width, 0)
+                self.assertLessEqual(x + width, 20)
+                self.assertLessEqual(y + height, 20)
+                self.assertLessEqual(len(control["TEXT"][4:]), width * 2)
+                for other in controls:
+                    if other == control:
+                        continue
+                    ox, oy, ow, oh = map(int, other["RGN"].split(","))
+                    self.assertTrue(x + width <= ox or ox + ow <= x or y + height <= oy or oy + oh <= y,
+                                    f"subtitle size control overlaps {other}")
 
     def test_value_columns_and_help_fit_the_original_cell_grid(self):
         for registry, _ in registries(self.output):
@@ -445,7 +503,7 @@ class VideoMenu(unittest.TestCase):
                 self.assertGreater(width, 0)
                 self.assertLessEqual(x + width, 20)
                 self.assertLessEqual(y + height, 20)
-                if y == 2:
+                if y == 1:
                     continue # Original localized heading.
                 self.assertEqual(height, 1)
                 if "TEXT" in props:
@@ -470,8 +528,8 @@ class VideoMenu(unittest.TestCase):
                 intervals.sort()
                 for left, right in zip(intervals, intervals[1:]):
                     self.assertLessEqual(left[1], right[0], f"overlapping columns on row {y}")
-            for y in range(4, 7 + len(SETTINGS)):
-                self.assertEqual(rows[y], [(1, 19)] if y in (6, 7) else [(1, 11), (11, 19)])
+            for y in range(3, 6 + len(SETTINGS)):
+                self.assertEqual(rows[y], [(1, 19)] if y in (5, 6) else [(1, 11), (11, 19)])
 
     def test_chunk_bounds_and_original_hash_algorithm(self):
         for registry, _ in registries(self.output):
@@ -524,6 +582,12 @@ class VideoMenu(unittest.TestCase):
         scripts = [registry.decode(prop)[1] for child in page.children for prop in child.children
                    if registry.decode(prop)[0] == "SCRIPT_PRESSED"]
         self.assertEqual(scripts, ["darkrecomp." + key for key in SETTINGS])
+        self.assertNotIn("darkrecomp.subtitle_scale", scripts)
+        subtitle_page, = [n for n in registry.roots if registry.decode(n) == ("WINDOW", "options_subtitles")]
+        subtitle_scripts = [registry.decode(prop)[1] for child in subtitle_page.children for prop in child.children
+                            if registry.decode(prop)[0] == "SCRIPT_PRESSED"]
+        self.assertEqual(subtitle_scripts, ["darkrecomp.subtitle_scale"],
+                         "startup cache must contain the moved subtitle setting")
         profiles = [dict(registry.decode(prop) for prop in child.children)
                     for child in page.children if registry.decode(child)[0] == "WINDOW"
                     and dict(registry.decode(prop) for prop in child.children).get("GROUP") == "colorprofile"]

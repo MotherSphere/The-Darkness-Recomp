@@ -4,13 +4,18 @@
 
 namespace DarkRecomp::Native {
 namespace {
-std::atomic<bool> russian{false};
+// Private tag for the Russian revision's retail English content slot.
+constexpr uint32_t russianMenuLanguage = 0xffffffffu;
+std::atomic<uint32_t> menuLanguage{1};
 }
 void initializeNativeMenuText(bool russianRevision, uint32_t consoleLanguage) noexcept {
-    russian.store(russianRevision && consoleLanguage == 1, std::memory_order_relaxed);
+    const auto language = russianRevision && consoleLanguage == 1 ? russianMenuLanguage :
+        consoleLanguage == 3 || consoleLanguage == 4 || consoleLanguage == 5 || consoleLanguage == 6 ? consoleLanguage : 1;
+    menuLanguage.store(language, std::memory_order_relaxed);
 }
-bool russianNativeMenus() noexcept { return russian.load(std::memory_order_relaxed); }
+bool russianNativeMenus() noexcept { return menuLanguage.load(std::memory_order_relaxed) == russianMenuLanguage; }
 std::string_view nativeMenuText(std::string_view english) noexcept {
-    return russianNativeMenus() ? russianNativeMenuText(english) : english;
+    const auto language = menuLanguage.load(std::memory_order_relaxed);
+    return language == russianMenuLanguage ? russianNativeMenuText(english) : subtitleNativeMenuText(language, english);
 }
 }

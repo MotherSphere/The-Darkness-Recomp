@@ -161,6 +161,7 @@ void resetPartialWorldDraw(WorldDraw* raw) noexcept {
     raw->material = WorldMaterial::depth;
     raw->fragmentFlags = 0;
     raw->promptContext = PromptRenderContext::Menu;
+    raw->subtitle = false;
 }
 void recycleWorldDraw(WorldDraw* raw) noexcept {
     if(!raw) return;
@@ -920,6 +921,7 @@ static bool snapshotWorldTargets(uint8_t* base,uint32_t device,WorldSurfaceTarge
 }
 static bool snapshotWorldDrawInto(uint8_t* base,const StoredDraw& geometry,WorldDraw& result) noexcept {
     result.promptContext = currentPromptRenderContext();
+    result.subtitle = currentSubtitleRenderContext();
     ++observed;
     auto fail=[&](unsigned step) {
         ++rejected;

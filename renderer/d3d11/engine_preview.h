@@ -45,10 +45,15 @@ class EnginePreviewD3D11 {
     Ptr<ID3D11DepthStencilState> depth_;
     Ptr<ID3D11RasterizerState> raster_;
     Ptr<ID3D11SamplerState> sampler_;
+    Ptr<ID3D11SamplerState> subtitleSampler_;
     struct CachedImage { std::shared_ptr<const AlphaImage> image; Ptr<ID3D11ShaderResourceView> view; };
     std::unordered_map<const AlphaImage*, CachedImage> textures_;
     struct CachedColor { std::shared_ptr<const ColorImage> image; Ptr<ID3D11ShaderResourceView> view; uint64_t used = 0; size_t bytes = 0; Ptr<ID3D11SamplerState> sampler; };
     std::unordered_map<const ColorImage*, CachedColor> colorTextures_;
+    CachedColor& colorImage(const std::shared_ptr<const ColorImage>& image);
+    struct FailedSubtitle { std::weak_ptr<const void> source; unsigned factor = 0; };
+    std::array<FailedSubtitle,16> failedSubtitles_{};
+    unsigned failedSubtitleNext_ = 0;
     size_t colorBytes_ = 0;
     uint64_t colorUse_ = 0;
     std::shared_ptr<const VideoFrame> videoImage_;

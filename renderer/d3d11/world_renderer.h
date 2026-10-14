@@ -58,6 +58,10 @@ class WorldRendererD3D11 {
     Ptr<ID3D11Device> device_;
     Ptr<ID3D11DeviceContext> context_;
     uint32_t scale_;
+    uint32_t subtitleRenderHeight_ = 0;
+    struct FailedSubtitle { std::weak_ptr<const ColorImage> source; unsigned factor = 0; };
+    std::array<FailedSubtitle,16> failedSubtitles_{};
+    unsigned failedSubtitleNext_ = 0;
     unsigned sampleCount_=1;
     unsigned requestedSampleCount_=0;
     std::unique_ptr<MsaaDepthTransferD3D11> msaaDepthTransfer_;
@@ -256,6 +260,7 @@ public:
     // contents and pending measurements; failed allocation leaves the old scale.
     bool setRenderScale(uint32_t scale);
     uint32_t renderScale() const {return scale_;}
+    void setSubtitleRenderHeight(uint32_t height) noexcept {subtitleRenderHeight_=height;}
     // Render-thread-only at a completed-frame boundary. Unsupported sample
     // counts fall back to the next lower count supported by both attachments.
     bool setSampleCount(unsigned samples);

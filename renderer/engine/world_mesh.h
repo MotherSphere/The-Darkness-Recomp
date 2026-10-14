@@ -106,6 +106,7 @@ struct WorldDraw : WorldSurfaceTargets {
     std::array<WorldSampler,16> samplers{};
     std::array<std::shared_ptr<const ColorImage>,16> textures{};
     PromptRenderContext promptContext = PromptRenderContext::Menu;
+    bool subtitle = false;
 };
 uint16_t worldFragmentTextureMask(std::string_view name,uint32_t flags) noexcept;
 struct WorldResolve : WorldSurfaceTargets {

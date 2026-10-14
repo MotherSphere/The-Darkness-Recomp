@@ -4,6 +4,7 @@
 #include "runtime/native/graphics_settings.h"
 #include "renderer/engine/prompt_icons.h"
 #include "renderer/engine/prompt_layout.h"
+#include "renderer/engine/subtitle_font.h"
 #include "renderer/engine/display_layout.h"
 #include "renderer/engine/video_layout.h"
 #include "runtime/native/input.h"
@@ -210,6 +211,9 @@ EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler.MaxLOD = D3D11_FLOAT32_MAX; sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
     check(device_->CreateSamplerState(&sampler, &sampler_), "create sampler");
+    sampler.MaxLOD=0;sampler.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    if(FAILED(device_->CreateSamplerState(&sampler,&subtitleSampler_)))
+        std::fputs("[SubtitleFont] GPU sampler unavailable; retaining original\n",stderr);
     vertex.Reset(); pixel.Reset();
     check(D3DCompile(shader, sizeof(shader)-1, "presentation", nullptr, nullptr,
                     "presentationVertex", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertex, nullptr), "compile presentation vertex");
@@ -228,6 +232,7 @@ EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext
     check(hr, "compile FXAA pixel shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &antialiasingPs_), "create FXAA pixel shader");
     world_=std::make_unique<WorldRendererD3D11>(device,context,scale);
+    world_->setSubtitleRenderHeight(height_);
     render({});
 }
 
@@ -269,6 +274,7 @@ bool EnginePreviewD3D11::resizeRenderTarget(uint32_t width,uint32_t height,uint3
         check(device_->CreateTexture2D(&desc,nullptr,&calibratedStaging),"resized calibrated readback");
     }
     world_->setRenderScale(scale);
+    world_->setSubtitleRenderHeight(height);
     target_=std::move(target);rtv_=std::move(rtv);presentationSource_=std::move(presentationSource);
     staging_=std::move(staging);width_=width;height_=height;
     calibrated_=std::move(calibrated);calibratedStaging_=std::move(calibratedStaging);
@@ -312,6 +318,40 @@ void EnginePreviewD3D11::uploadVideoFrame(const VideoFrame& video) {
     videoWidth_ = video.width; videoHeight_ = video.height;
 }
 
+EnginePreviewD3D11::CachedColor& EnginePreviewD3D11::colorImage(const std::shared_ptr<const ColorImage>& source) {
+    const auto& image=*source;
+    if(!image.valid() || image.faces!=1)throw std::invalid_argument("Invalid preview color image");
+    if(!colorTextures_.contains(source.get())) {
+        constexpr size_t budget=64*1024*1024;
+        const unsigned levels=image.authoredMips?unsigned(image.mips.size()+1):1;
+        size_t gpuBytes=0;
+        for(unsigned mip=0;mip<levels;++mip)gpuBytes+=size_t((std::max)(1u,image.width>>mip))*(std::max)(1u,image.height>>mip)*4;
+        auto makeRoom=[&] {
+            while((colorBytes_+gpuBytes>budget || colorTextures_.size()>=256) && !colorTextures_.empty()) {
+                auto oldest=std::min_element(colorTextures_.begin(),colorTextures_.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
+                colorBytes_-=oldest->second.bytes;colorTextures_.erase(oldest);
+            }
+        };
+        if(!image.generatedSubtitleFont)makeRoom();
+        D3D11_TEXTURE2D_DESC td{};td.Width=image.width;td.Height=image.height;
+        td.MipLevels=levels;td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        Ptr<ID3D11Texture2D> texture;CachedColor cached{source,{},0,gpuBytes,{}};
+        check(device_->CreateTexture2D(&td,nullptr,&texture),"upload original color texture");
+        for(unsigned mip=image.firstMip;mip<levels;++mip) {
+            const auto& pixels=mip?image.mips[mip-1]:image.pixels;
+            context_->UpdateSubresource(texture.Get(),mip,nullptr,pixels.data(),(std::max)(1u,image.width>>mip)*4,0);
+        }
+        check(device_->CreateShaderResourceView(texture.Get(),nullptr,&cached.view),"create color view");
+        if(image.firstMip) {
+            D3D11_SAMPLER_DESC desc{};sampler_->GetDesc(&desc);desc.MinLOD=float(image.firstMip);
+            check(device_->CreateSamplerState(&desc,&cached.sampler),"create resident color sampler");
+        }
+        if(image.generatedSubtitleFont)makeRoom();
+        colorTextures_.emplace(source.get(),std::move(cached));colorBytes_+=gpuBytes;
+    }
+    auto& cached=colorTextures_.at(source.get());cached.used=++colorUse_;return cached;
+}
 void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::PreviewFramePart part) {
     Native::StallProfiler::Scope stallRender(Native::StallProfiler::Section::Rendering, "EnginePreviewD3D11::render");
     if(part.first==frameOpen_)throw std::logic_error("Preview frame parts are out of order");
@@ -389,6 +429,23 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
             simpleStateDirty = true;
         }
         ID3D11SamplerState* defaultSampler=sampler_.Get();context_->PSSetSamplers(0,1,&defaultSampler);
+        std::shared_ptr<const ColorImage> subtitleImage;
+        if(mesh.subtitle && subtitleSampler_) {
+            const auto factor=Native::subtitleFontRasterScale(height_,Native::graphicsSettings().subtitleScalePercent);
+            const std::shared_ptr<const void> source=mesh.colorTexture?
+                std::shared_ptr<const void>(mesh.colorTexture):std::shared_ptr<const void>(mesh.texture);
+            const bool failed=std::any_of(failedSubtitles_.begin(),failedSubtitles_.end(),
+                [&](const auto& entry){return entry.factor==factor && entry.source.lock()==source;});
+            if(!failed) {
+                if(mesh.colorTexture)subtitleImage=Native::subtitleFontReplacementFor(mesh.textureId,mesh.colorTexture,factor);
+                else if(mesh.texture)subtitleImage=Native::subtitleFontReplacementFor(mesh.textureId,mesh.texture,factor);
+                if(subtitleImage)try {colorImage(subtitleImage);}
+                catch(const std::exception&) {
+                    failedSubtitles_[failedSubtitleNext_++%failedSubtitles_.size()]={source,factor};subtitleImage.reset();
+                    std::fprintf(stderr,"[SubtitleFont] GPU atlas unavailable id=%u factor=%u; retaining original\n",mesh.textureId,factor);
+                }
+            }
+        }
         if (mesh.video) {
             const auto& video = *mesh.video;
             if (!video.width || !video.height || video.width > 2048 || video.height > 2048 ||
@@ -403,7 +460,7 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
             context_->PSSetShaderResources(0,3,views); context_->PSSetShader(videoPs_.Get(),nullptr,0);
             // Original blend factors ONE,ZERO; video shader deliberately outputs alpha zero.
             context_->OMSetBlendState(nullptr,nullptr,~0u);
-        } else if (mesh.colorTexture) {
+        } else if (mesh.colorTexture || subtitleImage) {
             // Verified prompt textures resolve to cached native keycap/mouse
             // icons under keyboard/mouse source; anything else (including the
             // controller source) keeps the original artwork and cache entry.
@@ -411,7 +468,7 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
             // canvases and atlas tiles keep exact sample behavior instead of
             // stretching or cropping the replacement (look tutorial 64x32).
             std::shared_ptr<const ColorImage> promptIcon;
-            if (promptSource == Native::PromptRenderSource::KeyboardMouse && mesh.colorTexture &&
+            if (!subtitleImage && promptSource == Native::PromptRenderSource::KeyboardMouse && mesh.colorTexture &&
                 DarkRecomp::Prompts::buttonFromOriginByte(mesh.colorTexture->promptOrigin) !=
                 DarkRecomp::Prompts::Button::Unknown && !mesh.vertices.empty()) {
                 float u0 = mesh.vertices[0].uv[0], v0 = mesh.vertices[0].uv[1];
@@ -423,10 +480,10 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
                 }
                 promptIcon = Native::promptReplacementForUv(mesh.textureId, mesh.colorTexture,
                     promptSource, promptContext, u0, v0, u1, v1);
-            } else {
+            } else if(!subtitleImage) {
                 promptIcon = Native::promptReplacementFor(mesh.textureId, mesh.colorTexture, promptSource, promptContext);
             }
-            const auto& effective = promptIcon ? promptIcon : mesh.colorTexture;
+            const auto& effective = subtitleImage?subtitleImage:(promptIcon ? promptIcon : mesh.colorTexture);
             if (promptIcon && mesh.vertices.size() == 4 && mesh.indices.size() == 6) {
                 std::array<std::array<float,4>,4> clip{};
                 for (unsigned vertex = 0; vertex < 4; ++vertex)
@@ -441,35 +498,9 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
                     projection[row * 4 + 1] = transform[0] * projection[row * 4 + 1] + transform[2] * projection[row * 4 + 3];
                 }
             }
-            const auto& image = *effective;
-            if (!image.valid() || image.faces!=1)throw std::invalid_argument("Invalid preview color image");
-            if (!colorTextures_.contains(effective.get())) {
-                constexpr size_t budget=64*1024*1024;
-                const unsigned levels=image.authoredMips?unsigned(image.mips.size()+1):1;
-                size_t gpuBytes=0;
-                for(unsigned mip=0;mip<levels;++mip)gpuBytes+=size_t((std::max)(1u,image.width>>mip))*(std::max)(1u,image.height>>mip)*4;
-                while ((colorBytes_+gpuBytes>budget || colorTextures_.size()>=256) && !colorTextures_.empty()) {
-                    auto oldest=std::min_element(colorTextures_.begin(),colorTextures_.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
-                    colorBytes_-=oldest->second.bytes;colorTextures_.erase(oldest);
-                }
-                D3D11_TEXTURE2D_DESC td{};td.Width=image.width;td.Height=image.height;
-                td.MipLevels=levels;td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
-                td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-                Ptr<ID3D11Texture2D> texture;CachedColor cached{effective,{},0,gpuBytes,{}};
-                check(device_->CreateTexture2D(&td,nullptr,&texture),"upload original color texture");
-                for(unsigned mip=image.firstMip;mip<levels;++mip) {
-                    const auto& pixels=mip?image.mips[mip-1]:image.pixels;
-                    context_->UpdateSubresource(texture.Get(),mip,nullptr,pixels.data(),(std::max)(1u,image.width>>mip)*4,0);
-                }
-                check(device_->CreateShaderResourceView(texture.Get(),nullptr,&cached.view),"create color view");
-                if(image.firstMip) {
-                    D3D11_SAMPLER_DESC desc{};sampler_->GetDesc(&desc);desc.MinLOD=float(image.firstMip);
-                    check(device_->CreateSamplerState(&desc,&cached.sampler),"create resident color sampler");
-                }
-                colorBytes_+=gpuBytes;colorTextures_.emplace(effective.get(),std::move(cached));
-            }
-            auto& cached = colorTextures_.at(effective.get()); cached.used = ++colorUse_;
+            auto& cached=colorImage(effective);
             if(cached.sampler) {ID3D11SamplerState* sampler=cached.sampler.Get();context_->PSSetSamplers(0,1,&sampler);}
+            if(subtitleImage) {ID3D11SamplerState* sampler=subtitleSampler_.Get();context_->PSSetSamplers(0,1,&sampler);}
             ID3D11ShaderResourceView* views[]{nullptr,nullptr,cached.view.Get()};
             context_->PSSetShaderResources(0,3,views); context_->PSSetShader(colorPs_.Get(),nullptr,0);
             context_->OMSetBlendState(mesh.opaque ? nullptr : blend_.Get(),nullptr,~0u);

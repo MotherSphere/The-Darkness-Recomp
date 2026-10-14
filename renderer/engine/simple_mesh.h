@@ -39,6 +39,21 @@ void recordQueuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw, P
 void recordQueuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw, PromptRenderContext context, uint64_t generation) noexcept;
 PromptRenderContext queuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw) noexcept;
 PromptRenderContext queuedPromptContext(uint8_t* base, uint32_t manager, uint32_t draw, uint64_t generation) noexcept;
+// Subtitle ownership follows the same original VB frame/generation lifetime.
+// The queued value is independent of gameplay prompt/icon ownership.
+bool currentSubtitleRenderContext() noexcept;
+bool setSubtitleRenderContext(bool subtitle) noexcept;
+class ScopedSubtitleRenderContext {
+    bool previous_;
+public:
+    explicit ScopedSubtitleRenderContext(bool subtitle) noexcept
+        : previous_(setSubtitleRenderContext(subtitle)) {}
+    ~ScopedSubtitleRenderContext() noexcept { setSubtitleRenderContext(previous_); }
+    ScopedSubtitleRenderContext(const ScopedSubtitleRenderContext&) = delete;
+    ScopedSubtitleRenderContext& operator=(const ScopedSubtitleRenderContext&) = delete;
+};
+void recordQueuedSubtitleContext(uint8_t* base, uint32_t manager, uint32_t draw, bool subtitle, uint64_t generation) noexcept;
+bool queuedSubtitleContext(uint8_t* base, uint32_t manager, uint32_t draw, uint64_t generation) noexcept;
 }
 struct SimpleVertex { float position[3]; float uv[2]; float color[4]; };
 struct AlphaImage {
@@ -50,6 +65,8 @@ struct ColorImage {
     uint32_t faces = 1;
     std::vector<uint8_t> pixels; // Owned, tightly packed RGBA8.
     uint32_t sourceCodec = 0; // Decoder provenance only; all owned levels contain RGBA8 pixels.
+    // Only host-rasterized subtitle atlases exceed the authored image cap.
+    bool generatedSubtitleFont = false;
     // Verified original prompt origin, owned with this immutable generation.
     // Unknown (0) renders the original pixels; a known origin selects a cached
     // native icon at the render boundary. Set once at publish; never mutated
@@ -64,7 +81,8 @@ struct ColorImage {
     // leading levels stay empty; dimensions and mip indices are never rebased.
     unsigned firstMip = 0;
     bool valid() const {
-        if(!width || !height || width>2048 || height>2048 || (faces!=1 && faces!=6) ||
+        if(!width || !height || width>(generatedSubtitleFont?4096u:2048u) || height>2048 ||
+           (generatedSubtitleFont && faces!=1) || (faces!=1 && faces!=6) ||
            (faces==6 && width!=height) || mips.size()>=unsigned(std::bit_width((std::max)(width,height))) ||
            firstMip>mips.size() || (!authoredMips && (firstMip || !mips.empty())))return false;
         for(unsigned mip=0;mip<=mips.size();++mip) {
@@ -103,6 +121,7 @@ struct SimpleMesh {
     uint32_t textureId = 0;
     bool opaque = false;
     Native::PromptRenderContext promptContext = Native::PromptRenderContext::Menu;
+    bool subtitle = false;
 };
 
 namespace Native {
@@ -139,6 +158,9 @@ struct PreviewTexturePreloadCounters {
 };
 PreviewTexturePreloadCounters previewTexturePreloadCounters();
 void previewObserveImage(uint8_t* base, uint32_t image, uint32_t textureId, uint32_t mip);
+// A font definition binds to this owned upload generation, never an ID alone.
+std::shared_ptr<const AlphaImage> previewAlphaImageForSubtitleFont(uint32_t textureId) noexcept;
+std::shared_ptr<const ColorImage> previewColorImageForSubtitleFont(uint32_t textureId) noexcept;
 void previewObserveVideo(uint8_t* base, uint32_t container, uint32_t localId);
 // Adaptive prompt icon substitution, resolved at the render boundary.
 // Returns nullptr to keep the original controller artwork.

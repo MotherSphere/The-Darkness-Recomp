@@ -2,7 +2,7 @@
 
 XCR 0x203 stores little-endian node records/hashes and separate LE/BE value
 pools. Child lists are shared by their word offset in the chunk allocation.
-Keep the shipped pools and shared lists intact; append only the PC page.
+Keep the shipped pools and shared lists intact when adding PC controls.
 """
 import argparse
 from dataclasses import dataclass
@@ -237,27 +237,50 @@ def replace_video_page(registry, translations=None):
         # Preserve the original control's property order and native sizing.
         children.append(r.make("RGN", region))
         return r.make("WINDOW", "", children)
-    properties.append(window("CubeText", "nc, §LMENU_VIDEO_HEADING", "0,2,20,2"))
+    # The eleven native rows and original calibration controls fit above the
+    # footer by starting the heading one cell earlier on the existing grid.
+    properties.append(window("CubeText", "nc, §LMENU_VIDEO_HEADING", "0,1,20,2"))
     for row, (key, name, initial) in enumerate(zip(SETTINGS, SETTING_NAMES, INITIAL_VALUES)):
-        y = 4 + row + 3 * (row > 0)
+        y = 3 + row + 3 * (row > 0)
         properties.append(window("CubeText", "sc, " + name, f"1,{y},10,1"))
         properties.append(window("CubeButton", "sc, < " + initial.center(12) + " >", f"11,{y},8,1", "darkrecomp." + key))
         if row == 0:
-            properties.append(relocated(gamma_label, "1,5,10,1"))
-            properties.extend(relocated(n, "11,5,8,1") for n in gamma_controls)
+            properties.append(relocated(gamma_label, "1,4,10,1"))
+            properties.extend(relocated(n, "11,4,8,1") for n in gamma_controls)
             # Keep the original two-row profile layout wide enough for its
             # localized label and selected value. The button and value text
             # intentionally share a region, like the Gamma button and meter.
             # A separate focus group avoids the retail cableprofile arrow
             # painter, which assumes the original calibration-page layout.
             # The original option bindings still handle selection and saving.
-            properties.append(relocated(profile_label, "1,6,18,1"))
-            properties.extend(relocated(n, "1,7,18,1", hidden_focus=p["CLASSNAME"] == "CubeOptionButton",
+            properties.append(relocated(profile_label, "1,5,18,1"))
+            properties.extend(relocated(n, "1,6,18,1", hidden_focus=p["CLASSNAME"] == "CubeOptionButton",
                                         group="colorprofile")
                               for n, p in original_controls if p.get("GROUP") == "cableprofile")
     properties.append(window("CubeText", "sc, RESOLUTION/LANGUAGE: RESTART TO APPLY", "0,18,20,1"))
     properties.append(window("CubeText", "sc, LEFT/RIGHT: CHANGE; CONFIRM: NEXT", "0,19,20,1"))
     r.set_children(page, properties)
+
+
+def add_subtitle_size(r, translations=None):
+    page, = [n for n in r.roots if r.decode(n) == ("WINDOW", "options_subtitles")]
+
+    def window(cls, text, region, script=None, identifier=None):
+        children = [r.make("CLASSNAME", cls), r.make("TEXT", localized_text(text, region, translations))]
+        if script:
+            children.extend((r.make("SCRIPT_PRESSED", script), r.make("ALWAYSPAINT", "1")))
+        if identifier:
+            children.extend((r.make("ALWAYSPAINT", "1"), r.make("ID", identifier)))
+        children.append(r.make("RGN", region))
+        return r.make("WINDOW", "", children)
+
+    # Keep all authored category controls and their native option bindings.
+    # The size value uses the same live CubeButton action as other PC settings.
+    r.set_children(page, [*page.children,
+        window("CubeText", "sc, SUBTITLE SIZE", "2,15,8,1", identifier="DARKRECOMP_SUBTITLE_SIZE"),
+        window("CubeButton", "sc, < " + "100%".center(12) + " >", "11,15,8,1", "darkrecomp.subtitle_scale"),
+        window("CubeText", "sc, LEFT/RIGHT: CHANGE; CONFIRM: NEXT", "0,19,20,1", identifier="DARKRECOMP_SUBTITLE_HELP"),
+    ])
 
 
 def add_pc_menu_actions(r, translations=None):
@@ -363,6 +386,7 @@ def compile_menu(source, translations=None):
         assert version == 0x203
         r = Registry(data[offset:offset + size], endian)
         replace_video_page(r, translations)
+        add_subtitle_size(r, translations)
         add_pc_menu_actions(r, translations)
         payloads.append(r.encode())
     output = data[:0x90]
