@@ -76,6 +76,27 @@ retaining each glyph's authored position. This adjustment is scoped to the
 original heading and title/credits painters; their fades, pictures and other HUD text retain
 their existing layout.
 
+Dialogue subtitle rendering retains the original glyph geometry, wrapping,
+clipping, colors, fades and outline passes. At higher pixel densities, an owned
+atlas rasterizes system Arial outlines through DirectWrite with grayscale
+antialiasing. Each glyph fits its original ink rectangle within the unchanged
+normalized UV cell; font metrics and the 50%..200% Subtitle Size setting remain
+independent of raster quality. The original bitmap is retained at native 720p
+and 100% size, and for unsupported glyphs or unavailable font/raster resources.
+The scalable typeface follows the original proportions but its letter shapes
+can differ from the shipped fonts.
+
+Only the nine verified subtitle string callers tag their draws. Deferred native
+outline copies retain that tag through the original VB manager's frame generation
+and allocation lifetime. Font metadata binds to the actual owned upload generation
+for the Text or Darkness atlas, including both modern color and legacy alpha
+uploads. Texture ID reuse cannot attach old glyph metadata to a new image.
+Because the native atlas uploads lazily, verified subtitle producers refresh
+registration around their draw; unchanged font/image pairs retain the cached atlas.
+Raster density uses factors two, four or eight according to render height and
+subtitle size. The generated atlas cache has a 64 MiB budget; shipped image limits
+remain unchanged. Russian byte-coded fonts use the verified CP1251 content slot.
+
 Alt+Enter toggles borderless fullscreen. Window resizing recreates only the
 swapchain views, depth buffer and output readback resource, retaining the device,
 world textures and internal scene buffers. Presentation fits the existing scene

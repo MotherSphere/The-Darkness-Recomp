@@ -4,6 +4,8 @@
 
 namespace DarkRecomp::Native {
 constexpr unsigned kMaximumRenderHeight = 2160;
+constexpr unsigned kMinimumSubtitleScalePercent = 50;
+constexpr unsigned kMaximumSubtitleScalePercent = 200;
 enum class AntialiasingMode : uint8_t {
     Off = 0, FXAA = 1, SMAA = 2, MSAA2x = 3, MSAA4x = 4, MSAA8x = 5,
 };
@@ -38,6 +40,7 @@ struct GraphicsSettings {
     AntialiasingMode antialiasing = AntialiasingMode::Off; // Applies without a restart.
     unsigned brightnessPercent = 100; // 50..200; final image intensity, 100 is neutral.
     unsigned anisotropyLevels = 16; // 1 preserves original filtering; otherwise 2, 4, 8 or 16.
+    unsigned subtitleScalePercent = 100; // Applies immediately; 100 preserves the original text size.
     bool operator==(const GraphicsSettings&) const = default;
 };
 bool validGraphicsSettings(const GraphicsSettings&) noexcept;

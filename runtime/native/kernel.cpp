@@ -7,10 +7,12 @@
 #include "input.h"
 #include "language_settings.h"
 #include "display_mode.h"
+#include "graphics_settings.h"
 #include "flashback_layout.h"
 #include "thread_topology.h"
 #include "native_timed_wait.h"
 #include "renderer/engine/engine_performance.h"
+#include "renderer/engine/subtitle_font.h"
 #include "renderer/d3d11/display_context_d3d11.h"
 #include "objects.h"
 #include "storage.h"
@@ -2208,6 +2210,231 @@ PPC_FUNC(sub_82347838) {
     }
 }
 
+// Snapshot only the original bitmap font's completed metadata. The host
+// renderer uses this mapping for subtitle glyphs without changing guest metrics.
+extern "C" PPC_FUNC(__imp__sub_8238B6B8);
+PPC_FUNC(sub_8238B6B8) {
+    const uint32_t font = ctx.r3.u32;
+    __imp__sub_8238B6B8(ctx, base);
+    registerSubtitleFont(base, font);
+}
+namespace {
+// Narration, FMV and actor captions share this renderer through paired
+// passes or the actor's single native effect call. Wrapping and font metrics
+// stay in the original guest code.
+bool subtitleStringCaller(uint32_t caller) {
+    return caller == 0x8235F24C || caller == 0x8235F28C ||
+           caller == 0x823A134C || caller == 0x823A1394 ||
+           caller == 0x82331EF8 || caller == 0x82331F38 ||
+           caller == 0x8230D96C || caller == 0x8230E32C || caller == 0x8230E36C;
+}
+struct SubtitleTextScope;
+thread_local SubtitleTextScope* subtitleTextScope = nullptr;
+struct SubtitleTextScope {
+    SubtitleTextScope* previous = subtitleTextScope;
+    ScopedSubtitleRenderContext rendering{false};
+    uint32_t context = 0, clip = 0, font = 0;
+    float scale = 1, lineScale = 1, x = 0, y = 0;
+    uint32_t width = 0, gap = 0, percent = 100;
+    std::array<uint32_t,16> original{};
+    std::array<uint32_t,4> originalClip{};
+    bool fitted = false, centered = true;
+    explicit SubtitleTextScope(PPCContext& ctx) {
+        const uint32_t caller = uint32_t(ctx.lr);
+        if (!subtitleStringCaller(caller)) {
+            subtitleTextScope = nullptr;
+            return;
+        }
+        percent = graphicsSettings().subtitleScalePercent;
+        const bool actorSubtitle = caller == 0x82331EF8 || caller == 0x82331F38;
+        const bool movieSubtitle = caller == 0x823A134C || caller == 0x823A1394;
+        const bool animatedActor = caller == 0x8230D96C;
+        const bool animatedDarkness = caller == 0x8230E32C || caller == 0x8230E36C;
+        const bool leftAligned = actorSubtitle || animatedActor;
+        const bool validY = actorSubtitle ? (ctx.f2.f64 == 390 || ctx.f2.f64 == 400) :
+            (animatedActor || animatedDarkness ?
+                (std::isfinite(ctx.f2.f64) && ctx.f2.f64 >= 0 && ctx.f2.f64 <= 480) : ctx.f2.f64 == 376);
+        if (ctx.r9.u32 != (animatedActor ? 0x6000u : leftAligned ? 0x2000u : 0x2800u) || ctx.f3.f64 != 1 ||
+            ctx.f1.f64 != (leftAligned ? 75 : 60) || !validY ||
+            !guestBufferWritable(ctx.r3.u32, 684) ||
+            !guestBufferAccessible(ctx.r4.u32, 24) ||
+            !guestBufferAccessible(ctx.r1.u32 + 100, 28) ||
+            memory->read32(ctx.r4.u32 + 0) != 0 || memory->read32(ctx.r4.u32 + 4) != 0 ||
+            memory->read32(ctx.r4.u32 + 8) != (leftAligned ? 75u : 0u) ||
+            memory->read32(ctx.r4.u32 + 12) != 0 ||
+            memory->read32(ctx.r4.u32 + 16) != (leftAligned ? 565u : 640u) ||
+            memory->read32(ctx.r4.u32 + 20) != 480 ||
+            memory->read32(ctx.r1.u32 + 100) != (leftAligned ? 490u : 520u)) {
+            subtitleTextScope = nullptr;
+            return;
+        }
+        gap = memory->read32(ctx.r1.u32 + 124);
+        const bool validGap = actorSubtitle ?
+            ((ctx.f2.f64 == 400 && gap == 5) || (ctx.f2.f64 == 390 && gap == 10)) :
+            (movieSubtitle || animatedDarkness ? gap == 0 : (gap == 5 || gap == 10));
+        if (!validGap) {
+            subtitleTextScope = nullptr; return;
+        }
+        setSubtitleRenderContext(true);
+        lineScale = std::bit_cast<float>(memory->read32(ctx.r3.u32 + 348));
+        if (!std::isfinite(lineScale) || lineScale <= 0 || lineScale > 16 ||
+            (percent == 100 && lineScale == 1)) {
+            subtitleTextScope = nullptr;
+            return;
+        }
+        if (!guestBufferWritable(ctx.r4.u32 + 8, 16)) {
+            subtitleTextScope = nullptr;
+            return;
+        }
+        for (unsigned i = 0; i < original.size(); ++i) {
+            original[i] = memory->read32(ctx.r3.u32 + 272 + i * 4);
+            if (!std::isfinite(std::bit_cast<float>(original[i]))) {
+                subtitleTextScope = nullptr;
+                return;
+            }
+        }
+        context = ctx.r3.u32;
+        font = ctx.r5.u32;
+        clip = ctx.r4.u32 + 8;
+        for (unsigned i = 0; i < originalClip.size(); ++i)
+            originalClip[i] = memory->read32(clip + i * 4);
+        const unsigned mathMode = _mm_getcsr();
+        _mm_setcsr(mathMode & ~(_MM_ROUND_MASK | _MM_FLUSH_ZERO_MASK | _MM_DENORMALS_ZERO_MASK));
+        scale = float(percent) / 100;
+        _mm_setcsr(mathMode);
+        x = float(ctx.f1.f64); y = float(ctx.f2.f64);
+        centered = !leftAligned;
+        width = memory->read32(ctx.r1.u32 + 100);
+        subtitleTextScope = this;
+    }
+    ~SubtitleTextScope() {
+        if (fitted) {
+            for (unsigned i = 0; i < original.size(); ++i)
+                memory->write32(context + 272 + i * 4, original[i]);
+            for (unsigned i = 0; i < originalClip.size(); ++i)
+                memory->write32(clip + i * 4, originalClip[i]);
+        }
+        subtitleTextScope = previous;
+    }
+};
+
+}
+extern "C" PPC_FUNC(__imp__sub_8234C4C0);
+extern "C" PPC_FUNC(__imp__sub_8234A0C8);
+namespace {
+std::optional<int32_t> subtitleLineAdvance(uint32_t height, uint32_t gap, float lineScale) {
+    const double advance = std::ceil((double(height) + gap) * lineScale);
+    if (!std::isfinite(advance) || advance < 1 || advance > INT32_MAX) return {};
+    return int32_t(advance);
+}
+std::optional<float> subtitleBlockHeight(const PPCContext& input, uint32_t count, uint32_t gap,
+                                        float lineScale = 1) {
+    if (!count || count > 31 || !guestBufferAccessible(input.r8.u32, count * 4)) return {};
+    float height = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        const uint32_t line = memory->read32(input.r8.u32 + i * 4);
+        if (!guestBufferAccessible(line, 1024)) return {};
+        PPCContext metric = input;
+        metric.r3.u64 = input.r4.u64; metric.r4.u64 = line;
+        __imp__sub_8234A0C8(metric, memory->base());
+        if (metric.r3.s32 <= 0 || metric.r3.u32 > 480) return {};
+        // Keep the terminal native metric so the final baseline stays anchored.
+        // Only the preceding baseline advances follow the actual glyph scale.
+        if (i + 1 == count) height += float(metric.r3.u32);
+        else {
+            const auto advance = subtitleLineAdvance(metric.r3.u32, gap, lineScale);
+            if (!advance) return {};
+            height += float(*advance);
+        }
+    }
+    return height;
+}
+}
+PPC_FUNC(sub_8234A0C8) {
+    const auto* scope = subtitleTextScope;
+    const bool subtitle = scope && scope->fitted && scope->lineScale != 1 &&
+        uint32_t(ctx.lr) == 0x8234CD8C && ctx.r19.u32 == scope->context &&
+        ctx.r3.u32 == scope->font;
+    __imp__sub_8234A0C8(ctx, base);
+    if (subtitle && ctx.r3.s32 > 0 && ctx.r3.u32 <= 480) {
+        const auto advance = subtitleLineAdvance(ctx.r3.u32, scope->gap, scope->lineScale);
+        // C900 adds its original gap immediately after consuming this metric.
+        if (advance) ctx.r3.s64 = int64_t(*advance) - scope->gap;
+    }
+}
+PPC_FUNC(sub_8234C4C0) {
+    auto* scope = subtitleTextScope;
+    const bool subtitle = scope && scope->context == ctx.r3.u32 && !scope->fitted &&
+        uint32_t(ctx.lr) == 0x8234CA10 && ctx.r5.u32 == scope->width &&
+        guestBufferWritable(ctx.r1.u32 + 33420, 4);
+    if (!subtitle) {
+        __imp__sub_8234C4C0(ctx, base);
+        return;
+    }
+    const PPCContext input = ctx;
+    __imp__sub_8234C4C0(ctx, base);
+    const auto originalHeight = subtitleBlockHeight(input, ctx.r3.u32, scope->gap);
+    if (!originalHeight) {
+        return;
+    }
+    PPCContext reflow = input;
+    const uint32_t width = scope->width * 100 / scope->percent;
+    reflow.r5.u64 = width;
+    __imp__sub_8234C4C0(reflow, base);
+    const auto reflowHeight = subtitleBlockHeight(input, reflow.r3.u32, scope->gap, scope->lineScale);
+    if (!reflowHeight) {
+        // Restore the original output lines if a font rejects reflow metrics.
+        ctx = input;
+        __imp__sub_8234C4C0(ctx, base);
+        return;
+    }
+    const unsigned mathMode = _mm_getcsr();
+    _mm_setcsr(mathMode & ~(_MM_ROUND_MASK | _MM_FLUSH_ZERO_MASK | _MM_DENORMALS_ZERO_MASK));
+    std::array<float,16> matrix{};
+    for (unsigned i = 0; i < matrix.size(); ++i) matrix[i] = std::bit_cast<float>(scope->original[i]);
+    // Keep the original lower edge and its native alignment: actors retain
+    // their left margin, while narration and movies retain their center.
+    // Extra wrapped lines grow upward within the native clipping rectangle.
+    const float shiftX = scope->centered ?
+        scope->x + float(scope->width) * .5f - scope->scale * (scope->x + float(width) * .5f) :
+        scope->x * (1 - scope->scale);
+    const float bottom = (std::min)(scope->y + *originalHeight, 470.0f);
+    const float shiftY = bottom - scope->scale * (scope->y + *reflowHeight);
+    matrix[12] += matrix[0] * shiftX + matrix[4] * shiftY;
+    matrix[13] += matrix[1] * shiftX + matrix[5] * shiftY;
+    for (unsigned i : {0u, 1u, 4u, 5u}) matrix[i] *= scope->scale;
+    bool finite = true;
+    for (unsigned i : {0u, 1u, 4u, 5u, 12u, 13u}) finite &= std::isfinite(matrix[i]);
+    // Font clipping happens in local glyph coordinates, before the borrowed
+    // matrix. Keep the original canvas bounds while the wrapper uses its wider
+    // or narrower local width; otherwise shrinking silently clips line endings.
+    std::array<uint32_t,4> clip{};
+    for (unsigned i = 0; i < clip.size(); ++i) {
+        const double bound = (double(std::bit_cast<int32_t>(scope->originalClip[i])) -
+                              (i % 2 ? shiftY : shiftX)) / scope->scale;
+        const double rounded = i < 2 ? std::floor(bound) : std::ceil(bound);
+        if (!std::isfinite(rounded) || rounded < INT32_MIN || rounded > INT32_MAX) {
+            finite = false;
+        } else {
+            clip[i] = std::bit_cast<uint32_t>(int32_t(rounded));
+        }
+    }
+    _mm_setcsr(mathMode);
+    if (!finite) {
+        ctx = input;
+        __imp__sub_8234C4C0(ctx, base);
+        return;
+    }
+    for (unsigned i : {0u, 1u, 4u, 5u, 12u, 13u})
+        memory->write32(scope->context + 272 + i * 4, std::bit_cast<uint32_t>(matrix[i]));
+    for (unsigned i = 0; i < clip.size(); ++i)
+        memory->write32(scope->clip + i * 4, clip[i]);
+    // This is C900's private width argument, copied from the caller before
+    // wrapping. Its original horizontal-centering branch consumes it next.
+    memory->write32(input.r1.u32 + 33420, width);
+    scope->fitted = true;
+    ctx = reflow;
+}
 namespace {
 bool titleStringCaller(uint32_t caller) {
     switch (caller) {
@@ -2254,7 +2481,13 @@ PPC_FUNC(sub_8234C680) {
 extern "C" PPC_FUNC(__imp__sub_8234C7E0);
 PPC_FUNC(sub_8234C7E0) {
     StallProfiler::Scope stallProfile(StallProfiler::Section::Rendering, __func__, 0x8234C7E0u, uint32_t(ctx.lr));
+    const uint32_t subtitleFont = ctx.r5.u32;
     TitleTextShadow shadow(ctx);
+    SubtitleTextScope subtitles(ctx);
+    const bool subtitle = currentSubtitleRenderContext();
+    // The native atlas is uploaded lazily. Retry from the verified subtitle
+    // producer, retaining the actual font and its current owned image generation.
+    if (subtitle) ensureSubtitleFontRegistered(base, subtitleFont);
     const auto mode = nativeVideoMode();
     const uint32_t caller = uint32_t(ctx.lr), drawContext = ctx.r3.u32;
     // The #x,y gameplay-message branch bypasses the credits scroller.
@@ -2279,6 +2512,7 @@ PPC_FUNC(sub_8234C7E0) {
         }
     }
     __imp__sub_8234C7E0(ctx, base);
+    if (subtitle) ensureSubtitleFontRegistered(base, subtitleFont);
 }
 
 static void writeVideoMode(uint8_t* base, uint32_t address) {

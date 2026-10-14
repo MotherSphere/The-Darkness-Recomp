@@ -38,12 +38,13 @@ enum Row : size_t {
     Antialiasing,
     Language,
     TextureFiltering,
+    SubtitleSize,
     RowCount,
 };
 
 constexpr std::array<const wchar_t*, RowCount> kRowNames{
     L"Brightness", L"Field of view", L"Bloom", L"Vertical sync",
-    L"Frame limit", L"Resolution", L"Display", L"Motion blur", L"Antialiasing", L"Language", L"Texture filtering",
+    L"Frame limit", L"Resolution", L"Display", L"Motion blur", L"Antialiasing", L"Language", L"Texture filtering", L"Subtitle size",
 };
 
 struct Choice {
@@ -133,6 +134,7 @@ std::wstring savedValueLabel(Row row, double value) {
     wchar_t text[80]{};
     switch (row) {
     case Brightness: std::swprintf(text, 80, L"%u%% (saved)", unsigned(value)); break;
+    case SubtitleSize: std::swprintf(text, 80, L"%u%% (saved)", unsigned(value)); break;
     case FieldOfView: std::swprintf(text, 80, L"%.3f (saved)", value); break;
     case FrameLimit: std::swprintf(text, 80, L"%u FPS (saved)", unsigned(value)); break;
     case Resolution: std::swprintf(text, 80, L"%up (saved)", unsigned(value)); break;
@@ -161,6 +163,9 @@ void populateChoices(Launcher& launcher) {
     auto& rows = launcher.rows;
     for (unsigned value = 50; value <= 200; value += 5)
         addChoice(rows[Brightness], std::to_wstring(value) + L"%", value);
+    for (unsigned value = DarkRecomp::Native::kMinimumSubtitleScalePercent;
+         value <= DarkRecomp::Native::kMaximumSubtitleScalePercent; value += 10)
+        addChoice(rows[SubtitleSize], std::to_wstring(value) + L"%", value);
     addChoice(rows[FieldOfView], L"Original", 0);
     for (unsigned value = 60; value <= 120; ++value)
         addChoice(rows[FieldOfView], std::to_wstring(value), value);
@@ -200,6 +205,7 @@ void populateChoices(Launcher& launcher) {
     selectValue(launcher, MotionBlur, settings.motionBlur);
     selectValue(launcher, Antialiasing, unsigned(settings.antialiasing));
     selectValue(launcher, TextureFiltering, settings.anisotropyLevels);
+    selectValue(launcher, SubtitleSize, settings.subtitleScalePercent);
     selectValue(launcher, Language, unsigned(launcher.language));
 }
 
@@ -209,7 +215,7 @@ void createControls(HWND window, Launcher& launcher) {
     control(window, L"STATIC", L"Your current settings are loaded automatically.", 0,
             26, 40, 565, 20);
     for (size_t index = 0; index < RowCount; ++index) {
-        const int y = 76 + int(index) * 40;
+        const int y = 76 + int(index) * 36;
         control(window, L"STATIC", kRowNames[index], 0, 26, y + 4, 164, 22);
         launcher.rows[index].combo = control(window, L"COMBOBOX", L"",
             CBS_DROPDOWNLIST | CBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP,
@@ -247,6 +253,7 @@ void saveAndLaunch(HWND window, Launcher& launcher) {
     settings.motionBlur = chosenValue(launcher, MotionBlur) != 0;
     settings.antialiasing = AntialiasingMode(unsigned(chosenValue(launcher, Antialiasing)));
     settings.anisotropyLevels = unsigned(chosenValue(launcher, TextureFiltering));
+    settings.subtitleScalePercent = unsigned(chosenValue(launcher, SubtitleSize));
     const auto language = GameLanguage(unsigned(chosenValue(launcher, Language)));
 
     if (!DarkRecomp::saveDisplaySettings(launcher.settingsPath, fov, settings, language))

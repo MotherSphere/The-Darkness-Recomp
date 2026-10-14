@@ -79,6 +79,9 @@ bool changeVideoSetting(std::string_view action, int direction) noexcept {
         settings.anisotropyLevels = step(settings.anisotropyLevels, direction, std::array{1u, 2u, 4u, 8u, 16u});
     else if (action == "darkrecomp.brightness")
         settings.brightnessPercent = unsigned(std::clamp(int(settings.brightnessPercent) + direction * 5, 50, 200));
+    else if (action == "darkrecomp.subtitle_scale")
+        settings.subtitleScalePercent = unsigned(std::clamp(int(settings.subtitleScalePercent) + direction * 10,
+            int(kMinimumSubtitleScalePercent), int(kMaximumSubtitleScalePercent)));
     else if (action == "darkrecomp.vsync") settings.verticalSync = !settings.verticalSync;
     else if (action == "darkrecomp.mode") settings.fullscreen = !settings.fullscreen;
     else if (action == "darkrecomp.resolution")
@@ -110,6 +113,7 @@ std::string videoSettingLabel(std::string_view action) {
     else if (action == "darkrecomp.anisotropy")
         result = settings.anisotropyLevels == 1 ? "Original" : std::to_string(settings.anisotropyLevels) + "x";
     else if (action == "darkrecomp.brightness") result = std::to_string(settings.brightnessPercent) + "%";
+    else if (action == "darkrecomp.subtitle_scale") result = std::to_string(settings.subtitleScalePercent) + "%";
     else if (action == "darkrecomp.vsync") result = settings.verticalSync ? "On" : "Off";
     else if (action == "darkrecomp.mode") result = settings.fullscreen ? "Borderless" : "Windowed";
     else if (action == "darkrecomp.resolution") result = std::to_string(settings.renderHeight) + "p";
@@ -198,10 +202,16 @@ extern "C" PPC_FUNC(__imp__sub_8239A4E8);
 PPC_FUNC(sub_8239A4E8) {
     DarkRecomp::Native::StallProfiler::Scope stallProfile(DarkRecomp::Native::StallProfiler::Section::Guest, __func__, 0x8239A4E8u, uint32_t(ctx.lr));
     const auto window = ctx.r3.u32;
-    if (PPC_LOAD_U32(window) == 0x82074100 &&
-        byteString(base, window + 168) == "DARKRECOMP_KEYBOARD_STATUS") {
-        replaceLabel(ctx, base, window,
-            DarkRecomp::Native::keyboardMenuLabel("darkrecomp.keyboard.status"));
+    if (PPC_LOAD_U32(window) == 0x82074100) {
+        const auto identifier = byteString(base, window + 168);
+        if (identifier == "DARKRECOMP_KEYBOARD_STATUS")
+            replaceLabel(ctx, base, window,
+                DarkRecomp::Native::keyboardMenuLabel("darkrecomp.keyboard.status"));
+        else if (identifier == "DARKRECOMP_SUBTITLE_SIZE" || identifier == "DARKRECOMP_SUBTITLE_HELP") {
+            const auto key = identifier == "DARKRECOMP_SUBTITLE_SIZE" ? "SUBTITLE SIZE" :
+                "LEFT/RIGHT: CHANGE; CONFIRM: NEXT";
+            replaceLabel(ctx, base, window, "sc, " + std::string(DarkRecomp::Native::nativeMenuText(key)));
+        }
     }
     __imp__sub_8239A4E8(ctx, base);
 }

@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "encoding": "cp1252",
+  "description": "Subtitle Size and its help footer for the selectable game languages. Edit text in UTF-8; keep uppercase keys/text and the fixed original menu widths.",
+  "languages": {
+    "en": {
+      "SUBTITLE SIZE": {"text": "SUBTITLE SIZE", "max_glyphs": 16},
+      "LEFT/RIGHT: CHANGE; CONFIRM: NEXT": {"text": "LEFT/RIGHT: CHANGE; CONFIRM: NEXT", "max_glyphs": 40}
+    },
+    "de": {
+      "SUBTITLE SIZE": {"text": "UNTERTITELGRÖSSE", "max_glyphs": 16},
+      "LEFT/RIGHT: CHANGE; CONFIRM: NEXT": {"text": "LINKS/RECHTS: ÄNDERN; OK: WEITER", "max_glyphs": 40}
+    },
+    "fr": {
+      "SUBTITLE SIZE": {"text": "TAILLE SOUS-TIT.", "max_glyphs": 16},
+      "LEFT/RIGHT: CHANGE; CONFIRM: NEXT": {"text": "G./D.: CHANGER; VALIDER: SUIVANT", "max_glyphs": 40}
+    },
+    "es": {
+      "SUBTITLE SIZE": {"text": "TAM. SUBTÍTULOS", "max_glyphs": 16},
+      "LEFT/RIGHT: CHANGE; CONFIRM: NEXT": {"text": "IZQ./DER.: CAMBIAR; ACEPTAR: SIGUIENTE", "max_glyphs": 40}
+    },
+    "it": {
+      "SUBTITLE SIZE": {"text": "DIM. SOTTOTITOLI", "max_glyphs": 16},
+      "LEFT/RIGHT: CHANGE; CONFIRM: NEXT": {"text": "SIN./DES.: CAMBIA; CONFERMA: AVANTI", "max_glyphs": 40}
+    }
+  }
+}

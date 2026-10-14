@@ -1226,6 +1226,8 @@ PPC_FUNC(sub_8259D098) {
     const auto generation = DarkRecomp::Native::queuedPromptGeneration(base, manager);
     // Publish metadata before the original publishes its list node.
     DarkRecomp::Native::recordQueuedPromptContext(base, manager, draw, context, generation);
+    DarkRecomp::Native::recordQueuedSubtitleContext(base, manager, draw,
+        DarkRecomp::Native::currentSubtitleRenderContext(), generation);
     __imp__sub_8259D098(ctx, base);
 }
 extern "C" PPC_FUNC(__imp__sub_8259D3B8);
@@ -1247,8 +1249,11 @@ PPC_FUNC(sub_8259D3B8) {
         }
     } catch (...) { captured = false; }
     if (!captured) DarkRecomp::Native::resetQueuedPromptContexts(base, manager);
-    else for (uint32_t i = 0; i < count; ++i)
+    else for (uint32_t i = 0; i < count; ++i) {
         DarkRecomp::Native::recordQueuedPromptContext(base, manager, drawAt(i), context, generation);
+        DarkRecomp::Native::recordQueuedSubtitleContext(base, manager, drawAt(i),
+            DarkRecomp::Native::currentSubtitleRenderContext(), generation);
+    }
     __imp__sub_8259D3B8(ctx, base);
 }
 extern "C" PPC_FUNC(__imp__sub_825A24D0);
@@ -1265,6 +1270,10 @@ PPC_FUNC(sub_82299EA0) {
         uint32_t(ctx.lr) == 0x825A2E18 ? DarkRecomp::Native::queuedPromptContext(base,
         executingPromptManager->manager, ctx.r3.u32, executingPromptManager->generation) : DarkRecomp::Native::PromptRenderContext::Menu;
     const DarkRecomp::Native::ScopedPromptRenderContext scope(context);
+    const bool subtitle = executingPromptManager && executingPromptManager->base == base &&
+        uint32_t(ctx.lr) == 0x825A2E18 && DarkRecomp::Native::queuedSubtitleContext(base,
+        executingPromptManager->manager, ctx.r3.u32, executingPromptManager->generation);
+    const DarkRecomp::Native::ScopedSubtitleRenderContext subtitleScope(subtitle);
     __imp__sub_82299EA0(ctx, base);
 }
 

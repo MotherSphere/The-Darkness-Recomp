@@ -67,6 +67,7 @@ static void testVideoSettings(PPCContext& ctx) {
     check(!graphicsSettings().motionBlur, "motion blur must default to Off");
     check(graphicsSettings().antialiasing == AntialiasingMode::Off, "antialiasing must default to Off");
     check(graphicsSettings().brightnessPercent == 100, "brightness must default to neutral");
+    check(graphicsSettings().subtitleScalePercent == 100, "subtitles must default to the original size");
     for (unsigned bits = 0; bits < 16; ++bits) {
         for (const auto name : {"XREngine_Final5", "XREngine_Final4"}) {
             check(graphicsFragmentFlags(name, bits, true) == (bits & 14), "motion blur remained enabled");
@@ -87,12 +88,14 @@ static void testVideoSettings(PPCContext& ctx) {
                               AntialiasingMode::MSAA2x, AntialiasingMode::MSAA4x, AntialiasingMode::MSAA8x}) {
             auto selected = s; selected.antialiasing = aa;
             for (unsigned brightness : {50u, 95u, 100u, 200u})
-                for (unsigned anisotropy : {1u, 2u, 4u, 8u, 16u}) {
-                    selected.brightnessPercent = brightness;
-                    selected.anisotropyLevels = anisotropy;
-                    check(setGraphicsSettings(selected) && graphicsSettings() == selected,
-                          "graphics packing boundary corrupted antialiasing, brightness or filtering");
-                }
+                for (unsigned anisotropy : {1u, 2u, 4u, 8u, 16u})
+                    for (unsigned scale : {50u, 73u, 90u, 100u, 137u, 150u, 200u}) {
+                        selected.brightnessPercent = brightness;
+                        selected.anisotropyLevels = anisotropy;
+                        selected.subtitleScalePercent = scale;
+                        check(setGraphicsSettings(selected) && graphicsSettings() == selected,
+                              "graphics packing boundary corrupted antialiasing, brightness, filtering or subtitle size");
+                    }
         }
     for (const auto [mode, samples] : {std::pair{AntialiasingMode::Off, 1u}, {AntialiasingMode::FXAA, 1u},
                                       {AntialiasingMode::SMAA, 1u}, {AntialiasingMode::MSAA2x, 2u},
@@ -351,6 +354,57 @@ static void testVideoSettings(PPCContext& ctx) {
     for (int i=0;i<40;++i) changeVideoSetting("darkrecomp.brightness",1);
     check(graphicsSettings().brightnessPercent==200,"brightness upper bound wrapped");
     setGraphicsSettings(before);
+    // Subtitle size uses the same original button input path and persists live.
+    string(block + 0x3900, "darkrecomp.subtitle_scale");
+    call = ctx;
+    call.r3.u64 = button; call.r4.u64 = block + 0x3200;
+    call.r5.u64 = block + 0x3000; call.r6.u64 = block + 0x3900;
+    sub_8239F0E0(call, base);
+    while (takeDisplaySettingsSaveRequest()) {}
+    key(227);
+    auto largerSubtitles = before; largerSubtitles.subtitleScalePercent = 110;
+    check(graphicsSettings() == largerSubtitles && takeDisplaySettingsSaveRequest() &&
+          videoSettingLabel("darkrecomp.subtitle_scale").find("110%") != std::string::npos,
+          "Right did not enlarge subtitles independently or request persistence");
+    key(227 | 0x8000);
+    check(graphicsSettings() == largerSubtitles && !takeDisplaySettingsSaveRequest(),
+          "key release changed subtitle size twice");
+    key(226);
+    check(graphicsSettings() == before && takeDisplaySettingsSaveRequest(), "Left did not restore original subtitle size");
+    key(226);
+    auto smallerSubtitles = before; smallerSubtitles.subtitleScalePercent = 90;
+    check(graphicsSettings() == smallerSubtitles && takeDisplaySettingsSaveRequest() &&
+          videoSettingLabel("darkrecomp.subtitle_scale").find("90%") != std::string::npos,
+          "Left did not shrink subtitles independently or request persistence");
+    key(227);
+    check(graphicsSettings() == before && takeDisplaySettingsSaveRequest(), "Right did not restore original subtitle size");
+    key(228);
+    check(graphicsSettings() == largerSubtitles && takeDisplaySettingsSaveRequest(), "Confirm did not enlarge subtitles");
+    call = ctx; call.r3.u64 = button;
+    sub_823981D8(call, base);
+    largerSubtitles.subtitleScalePercent = 120;
+    check(graphicsSettings() == largerSubtitles && call.r3.u32 == 1 && takeDisplaySettingsSaveRequest(),
+          "pressed callback did not enlarge subtitles");
+    memory->write32(button + 84, 0);
+    key(227);
+    check(graphicsSettings() == largerSubtitles && !takeDisplaySettingsSaveRequest(),
+          "inactive subtitle size row consumed input");
+    memory->write32(button + 84, 1);
+    for (int i = 0; i < 30; ++i) changeVideoSetting("darkrecomp.subtitle_scale", -1);
+    check(graphicsSettings().subtitleScalePercent == 50, "subtitle size lower bound wrapped");
+    for (int i = 0; i < 30; ++i) changeVideoSetting("darkrecomp.subtitle_scale", 1);
+    check(graphicsSettings().subtitleScalePercent == 200, "subtitle size upper bound wrapped");
+    while (takeDisplaySettingsSaveRequest()) {}
+    check(!changeVideoSetting("darkrecomp.subtitle_scale", 0) && !changeVideoSetting("darkrecomp.subtitle_scale", 2) &&
+          graphicsSettings().subtitleScalePercent == 200 && !takeDisplaySettingsSaveRequest(),
+          "invalid direction changed or persisted subtitle size");
+    auto customSubtitles = before; customSubtitles.subtitleScalePercent = 137;
+    setGraphicsSettings(customSubtitles);
+    check(videoSettingLabel("darkrecomp.subtitle_scale").find("137%") != std::string::npos,
+          "subtitle row rounded an untouched saved percentage");
+    changeVideoSetting("darkrecomp.subtitle_scale", 1);
+    check(graphicsSettings().subtitleScalePercent == 147, "subtitle row discarded a custom saved percentage");
+    setGraphicsSettings(before);
     // Select the language through the original CubeButton property parser,
     // directional messages, Confirm dispatch and pressed callback. Preference
     // changes must request persistence without changing any graphics setting.
@@ -423,7 +477,7 @@ static void testVideoSettings(PPCContext& ctx) {
     // The engine gives small text two glyphs per cell. Dynamic values must
     // fit the authored eight-cell column without a font change or word wrap.
     for (const auto action : {"darkrecomp.fov", "darkrecomp.bloom", "darkrecomp.vsync",
-                              "darkrecomp.fps", "darkrecomp.resolution", "darkrecomp.mode", "darkrecomp.motionblur", "darkrecomp.antialiasing", "darkrecomp.brightness", "darkrecomp.language"}) {
+                              "darkrecomp.fps", "darkrecomp.resolution", "darkrecomp.mode", "darkrecomp.motionblur", "darkrecomp.antialiasing", "darkrecomp.brightness", "darkrecomp.language", "darkrecomp.subtitle_scale"}) {
         for (int i = 0; i < 128; ++i) {
             for (bool saved : {true, false}) {
                 reportDisplaySettingsSave(saved);

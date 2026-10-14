@@ -63,8 +63,14 @@ and rebuild the menus.
 The mouse captures automatically when keyboard/mouse gameplay starts or resumes
 after a menu. Click the game window to recapture after a manual release or Alt-Tab.
 **F1** shows controls, **F2** toggles
-capture, and **Esc** releases it. Graphics options are in **Options > Video Settings**
+capture, and **Esc** releases it. Graphics options are in **Options > Video Quality**
 and in the video settings launcher. Both use the same saved settings.
+**Options > Subtitles > Subtitle Size** adjusts dialogue subtitles from 50% to 200%
+and applies immediately in game. The default 100% retains the original text size;
+the setting is saved for the next launch.
+Higher-resolution subtitles use scalable Arial glyphs with grayscale antialiasing,
+while retaining the game's spacing, wrapping, fades and outlines. Original bitmap
+glyphs remain the fallback when the system font or a character is unavailable.
 Click menu choices to select them; the mouse wheel also changes choices and **E** confirms.
 Choose **Extra Content > Achievements** in the main menu to see the original
 achievement list. Unlocks from gameplay are stored in
