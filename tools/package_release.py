@@ -1,4 +1,4 @@
-"""Build, test, and package a Windows release without local game or user data."""
+"""Build and test a Windows release, with diagnostic launchers in a separate ZIP."""
 import argparse
 import hashlib
 import json
@@ -14,8 +14,9 @@ BINARIES = (
     'avcodec-darkxma-62.dll', 'avutil-darkxma-60.dll', 'libwinpthread-1.dll',
     'CubeWnd.pc.xcr', 'CubeWnd.pc.ru.xcr', 'CubeWnd.pc.xcr.source.sha256', 'GameContext_Create.pc.xdf',
 )
-DOCUMENTS = ('Launch.cmd', 'LaunchWithSettings.cmd', 'LaunchWithUpdates.cmd', 'LaunchStallProfiler.cmd', 'Launch.sh', 'SetupLinux.cmd', 'PlayLinux.cmd', 'START_HERE.txt', 'README.md', 'CONTROLS.md', 'RENDERING.md', 'STEAM_DECK.md', 'COPYING',
+DOCUMENTS = ('Launch.cmd', 'LaunchWithSettings.cmd', 'LaunchWithUpdates.cmd', 'Launch.sh', 'SetupLinux.cmd', 'PlayLinux.cmd', 'START_HERE.txt', 'README.md', 'CONTROLS.md', 'RENDERING.md', 'STEAM_DECK.md', 'COPYING',
              'assets/localization/README.md', 'assets/localization/native_menu_ru.json')
+DIAGNOSTIC_LAUNCHERS = ('LaunchStallProfiler.cmd', 'LaunchShadowCapture.cmd')
 LINUX_SETUP_TOOLS = ('setup_linux.ps1', 'setup_linux.py', 'wsl_graphics.py')
 CRT_REQUIRED = ('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
 
@@ -115,6 +116,52 @@ def package(root: Path, crt: Path, output: Path, version: str, revision: str) ->
     return archive
 
 
+def package_diagnostics(root: Path, output: Path, version: str, revision: str) -> Path:
+    if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
+        raise ValueError('Use a release version such as v0.1.1.')
+    files = {name: root / name for name in DIAGNOSTIC_LAUNCHERS}
+    for name, path in files.items():
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f'Missing or empty diagnostic launcher: {name} ({path})')
+    archive = output / f'The-Darkness-Recomp-{version}-diagnostic-launchers.zip'
+    checksum = archive.with_suffix('.zip.sha256')
+    if archive.exists() or checksum.exists():
+        raise FileExistsError(f'Refusing to overwrite existing diagnostics: {archive}')
+    instructions = (
+        f'THE DARKNESS RECOMP {version} - OPTIONAL DIAGNOSTIC LAUNCHERS\r\n\r\n'
+        f'Install The-Darkness-Recomp-{version}-windows-x64.zip first.\r\n'
+        'Extract this ZIP into that same folder, beside Launch.cmd.\r\n'
+        'These launchers use the installed game and your saved settings.\r\n'
+        'No game files or runtime binaries are included in this ZIP.\r\n\r\n'
+        'LaunchStallProfiler.cmd: reproduce a hitch, then close the game.\r\n'
+        'The newest build_native/run/desktop-*/runtime.log contains\r\n'
+        '[STALL] and [WAIT] timing reports. Profiling only affects this run.\r\n\r\n'
+        'LaunchShadowCapture.cmd: play with shadow capture enabled.\r\n'
+        'Press F8 during gameplay to capture a frame (up to two captures).\r\n'
+        'Capture files are written under build_native/run.\r\n\r\n'
+        'Use Launch.cmd for ordinary play. Share diagnostic logs when\r\n'
+        'reporting issues; do not upload game files or private saves.\r\n'
+    ).encode('utf-8')
+    manifest = {
+        'version': version, 'commit': revision,
+        'source': f'https://github.com/portingpete/The-Darkness-Recomp/tree/{revision}',
+        'sha256': {name: hashlib.sha256(path.read_bytes()).hexdigest()
+                   for name, path in sorted(files.items())},
+    }
+    manifest['sha256']['DIAGNOSTICS_README.txt'] = hashlib.sha256(instructions).hexdigest()
+    output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, 'x', zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+        for name, path in sorted(files.items()):
+            bundle.write(path, name)
+        bundle.writestr('DIAGNOSTICS_README.txt', instructions)
+        bundle.writestr('DIAGNOSTICS.json', json.dumps(manifest, indent=2) + '\n')
+    with zipfile.ZipFile(archive) as bundle:
+        if bundle.testzip() is not None:
+            raise RuntimeError('Diagnostic ZIP verification failed.')
+    checksum.write_text(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n', encoding='utf-8')
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', required=True)
@@ -137,6 +184,7 @@ def main():
     if current != revision:
         raise RuntimeError('Source revision changed during the build; refusing to package.')
     print(package(ROOT, args.crt_dir or find_crt(ROOT), args.output_dir, args.version, revision))
+    print(package_diagnostics(ROOT, args.output_dir, args.version, revision))
 
 
 if __name__ == '__main__':

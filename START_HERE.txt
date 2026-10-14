@@ -10,7 +10,6 @@ THE DARKNESS RECOMP - START HERE
      Launch.cmd
      LaunchWithSettings.cmd
      LaunchWithUpdates.cmd
-     LaunchStallProfiler.cmd
      Darkness\
        default.xex
        Content\
@@ -99,7 +98,9 @@ IF IT DOESN'T START
 - If the game closes after launch, look in build_native\run for the newest
   desktop-* folder and its runtime.log. Include that log when reporting the
   problem at https://github.com/portingpete/The-Darkness-Recomp/issues.
-- To diagnose a hitch, use LaunchStallProfiler.cmd, reproduce the slowdown,
+- Diagnostic launchers are supplied in the separate diagnostic-launchers ZIP.
+  Extract that optional ZIP beside Launch.cmd when troubleshooting.
+- To diagnose a hitch, use its LaunchStallProfiler.cmd, reproduce the slowdown,
   and close the game. The newest desktop-*\runtime.log contains [STALL] and
   [WAIT] timing reports plus the largest slow-frame contributors. It uses your
   saved settings, and profiling is disabled again on an ordinary launch.

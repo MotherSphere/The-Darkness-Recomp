@@ -37,7 +37,7 @@ class ReleaseTests(unittest.TestCase):
         self.bin.mkdir(parents=True)
         for name in release.BINARIES:
             (self.bin / name).write_bytes(b'build output')
-        for name in release.DOCUMENTS:
+        for name in (*release.DOCUMENTS, *release.DIAGNOSTIC_LAUNCHERS):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / name).write_bytes((ROOT / name).read_bytes())
         deps = self.root / 'build_native/deps'
@@ -94,7 +94,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(bundle.read('LaunchWithUpdates.cmd'), (ROOT / 'LaunchWithUpdates.cmd').read_bytes())
             self.assertEqual(bundle.read('tools/update_release.ps1'), (ROOT / 'tools/update_release.ps1').read_bytes())
             self.assertEqual(bundle.read('tools/update_commits.ps1'), (ROOT / 'tools/update_commits.ps1').read_bytes())
-            self.assertEqual(bundle.read('LaunchStallProfiler.cmd'), (ROOT / 'LaunchStallProfiler.cmd').read_bytes())
+            for name in release.DIAGNOSTIC_LAUNCHERS:
+                self.assertNotIn(name, names)
             self.assertIn('Launch.sh', names)
             self.assertIn('SetupLinux.cmd', names)
             self.assertIn('PlayLinux.cmd', names)
@@ -142,6 +143,44 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'avcodec-darkxma-62.dll'):
             release.package(self.root, self.crt, self.root / 'out', 'v0.1.1', 'abc123')
         self.assertFalse((self.root / 'out').exists())
+
+    def test_diagnostics_are_a_separate_launcher_only_package(self):
+        path = release.package_diagnostics(self.root, self.root / 'out', 'v0.1.1', 'abc123')
+        with zipfile.ZipFile(path) as bundle:
+            self.assertEqual(set(bundle.namelist()),
+                             {*release.DIAGNOSTIC_LAUNCHERS, 'DIAGNOSTICS_README.txt', 'DIAGNOSTICS.json'})
+            for name in release.DIAGNOSTIC_LAUNCHERS:
+                self.assertEqual(bundle.read(name), (ROOT / name).read_bytes())
+            instructions = bundle.read('DIAGNOSTICS_README.txt').decode('utf-8')
+            self.assertIn('The-Darkness-Recomp-v0.1.1-windows-x64.zip', instructions)
+            self.assertIn('beside Launch.cmd', instructions)
+            self.assertIn('Press F8 during gameplay', instructions)
+            manifest = json.loads(bundle.read('DIAGNOSTICS.json'))
+            self.assertEqual(manifest['version'], 'v0.1.1')
+            self.assertEqual(manifest['commit'], 'abc123')
+            for name, expected in manifest['sha256'].items():
+                self.assertEqual(hashlib.sha256(bundle.read(name)).hexdigest(), expected)
+        self.assertIn(hashlib.sha256(path.read_bytes()).hexdigest(), path.with_suffix('.zip.sha256').read_text())
+
+    def test_missing_diagnostic_launcher_is_rejected(self):
+        for name in release.DIAGNOSTIC_LAUNCHERS:
+            with self.subTest(name=name):
+                path = self.root / name
+                original = path.read_bytes()
+                path.unlink()
+                try:
+                    with self.assertRaisesRegex(RuntimeError, name.replace('.', r'\.')):
+                        release.package_diagnostics(self.root, self.root / 'out', 'v0.1.1', 'abc123')
+                    self.assertFalse((self.root / 'out').exists())
+                finally:
+                    path.write_bytes(original)
+
+    def test_existing_diagnostics_are_preserved(self):
+        path = release.package_diagnostics(self.root, self.root / 'out', 'v0.1.1', 'abc123')
+        original = path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            release.package_diagnostics(self.root, self.root / 'out', 'v0.1.1', 'abc123')
+        self.assertEqual(path.read_bytes(), original)
 
     def test_missing_crt_is_rejected(self):
         (self.crt / 'msvcp140.dll').unlink()
