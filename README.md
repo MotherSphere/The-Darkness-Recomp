@@ -198,6 +198,10 @@ The XMA audio build also requires MSYS2 at `C:\msys64` with MinGW64 GCC and
 
 Extra arguments reach the game untouched, e.g. `Launch.cmd play --fps 120`.
 
+Downloaded releases supply `LaunchStallProfiler.cmd` and `LaunchShadowCapture.cmd`
+in a separate optional **diagnostic-launchers ZIP**. Extract it into the installed
+game folder, beside `Launch.cmd`. These launchers are also in source checkouts.
+
 For runtime hitch diagnostics, use `LaunchStallProfiler.cmd`, reproduce the hitch,
 then close the game. The newest `build_native/run/desktop-*/runtime.log` includes
 `[STALL]` reports for frames over 16.67 ms and runtime/HLE calls over 2 ms,
@@ -265,13 +269,16 @@ commands install the missing generator patches and regenerate the output.
 Maintainers can build, test, and package a Windows ZIP with:
 
 ```powershell
-python tools/package_release.py --version v0.1.1
+python tools/package_release.py --version v0.1.7
 ```
 
 Run from a clean, committed checkout with the build prerequisites installed.
-The ZIP and SHA-256 checksum land in `build_native/releases/`. The packager
-includes the launcher, runtime dependencies, notices, and audio-library source;
-game dumps, saves, settings, build tools, and diagnostic logs are excluded.
+The Windows ZIP, optional diagnostic-launchers ZIP, and their SHA-256 checksums
+land in `build_native/releases/`. The Windows ZIP includes the normal launchers,
+runtime dependencies, notices, and audio-library source. Diagnostic launchers
+are only in the separate ZIP, with instructions for extracting it beside
+`Launch.cmd`. Game dumps, saves, settings, build tools, and diagnostic logs
+are excluded from both packages.
 
 ## Tests
 
