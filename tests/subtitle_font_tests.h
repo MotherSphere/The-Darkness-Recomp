@@ -16,7 +16,8 @@ struct SubtitleFontFixture {
     std::shared_ptr<const AlphaImage> alpha;
     std::shared_ptr<const ColorImage> color;
     const unsigned width,height;
-    explicit SubtitleFontFixture(uint32_t id,bool modern=false,unsigned w=64,unsigned h=32,bool deferred=false):
+    explicit SubtitleFontFixture(uint32_t id,bool modern=false,unsigned w=64,unsigned h=32,bool deferred=false,
+                                 const char* resource="TEXT"):
         memory(4096+size_t(w)*h),textureId(id),width(w),height(h) {
         auto* b=memory.data();
         put(b+64,0x82097610);put(b+72,4096);put(b+76,width*height);
@@ -53,7 +54,8 @@ struct SubtitleFontFixture {
             for(size_t i=0;i<alpha->pixels.size();++i)image->pixels[i*4+3]=alpha->pixels[i];
             color=std::move(image);
         }
-        registerSubtitleFont(b,128);
+        put(b+772,800);std::memcpy(b+802,resource,std::strlen(resource)+1);
+        registerSubtitleFont(b,128,subtitleFontResourceAllowsReplacement(b,768));
     }
 };
 static void subtitleFontCpuContract() {
@@ -62,6 +64,47 @@ static void subtitleFontCpuContract() {
         subtitleFontRasterScale(2160,200)==8 && subtitleFontRasterScale(2160,50)==2,"Font raster density differs");
     require(subtitleFontCodepoint(0x80,false)==0x20ac && subtitleFontCodepoint(0xc0,true)==0x0410 &&
         subtitleFontCodepoint(0x0410,false)==0x0410,"Font byte-code translation differs");
+    for(const bool modern:{false,true}) {
+        SubtitleFontFixture decorative(modern?60121:60120,modern,64,32,false,"DARKNESS");
+        const auto original=decorative.color->pixels;
+        const auto attempts=DarkRecomp::Native::Tests::subtitleFontRasterizerAttempts();
+        for(const unsigned factor:{1u,2u,4u,8u}) {
+            ensureSubtitleFontRegistered(decorative.memory.data(),128);
+            require(!subtitleFontReplacementFor(decorative.textureId,decorative.color,factor) &&
+                !subtitleFontReplacementFor(decorative.textureId,decorative.alpha,factor),
+                "Darkness quotes acquired replacement lettering");
+        }
+        require(decorative.color->pixels==original &&
+            attempts==DarkRecomp::Native::Tests::subtitleFontRasterizerAttempts(),
+            "Decorative font pixels changed or reached the rasterizer");
+    }
+    SubtitleFontFixture resource(60122,true,64,32,false,"fonts\\text.xfc");
+    require(bool(subtitleFontReplacementFor(resource.textureId,resource.color,4)),
+        "Named ordinary font lost replacement lettering");
+    registerSubtitleFont(resource.memory.data(),128,false);
+    ensureSubtitleFontRegistered(resource.memory.data(),128);
+    require(!subtitleFontReplacementFor(resource.textureId,resource.color,4),
+        "Decorative load at a reused font address retained cached lettering");
+    for(const char* name:{"DARKNESS","fonts/DARKNESS.xfc","TEXTURE","UNKNOWN",""}) {
+        std::memset(resource.memory.data()+802,0,260);
+        std::memcpy(resource.memory.data()+802,name,std::strlen(name));
+        require(!subtitleFontResourceAllowsReplacement(resource.memory.data(),768),
+            "Decorative or unknown font resource authorized replacement");
+    }
+    std::memcpy(resource.memory.data()+802,"TEXT",5);
+    resource.memory[800]=0x20;
+    require(!subtitleFontResourceAllowsReplacement(resource.memory.data(),768),
+        "Wide resource name authorized replacement");
+    resource.memory[800]=0;
+    std::memset(resource.memory.data()+802,'T',260);
+    require(!subtitleFontResourceAllowsReplacement(resource.memory.data(),768) &&
+        !subtitleFontResourceAllowsReplacement(resource.memory.data(),0),
+        "Invalid resource name authorized replacement");
+    SubtitleFontFixture deferredDecorative(60123,true,64,32,true,"DARKNESS");
+    previewPublishTexture(deferredDecorative.textureId,0x80000000u+deferredDecorative.textureId,deferredDecorative.color);
+    ensureSubtitleFontRegistered(deferredDecorative.memory.data(),128);
+    require(!subtitleFontReplacementFor(deferredDecorative.textureId,deferredDecorative.color,4),
+        "Lazy Darkness atlas upload authorized replacement lettering");
     SubtitleFontFixture f(60101);const auto original=f.color->pixels;
     require(!subtitleFontReplacementFor(f.textureId,f.color,1) &&
         !subtitleFontReplacementFor(f.textureId,f.color,3) &&
@@ -71,7 +114,7 @@ static void subtitleFontCpuContract() {
         require(result && result->valid() && result->generatedSubtitleFont &&
             result->width==64*factor && result->height==32*factor,"Vector atlas was not created");
         require(result==subtitleFontReplacementFor(f.textureId,f.color,factor),"Font cache did not reuse immutable result");
-        ensureSubtitleFontRegistered(f.memory.data(),128);registerSubtitleFont(f.memory.data(),128);
+        ensureSubtitleFontRegistered(f.memory.data(),128);registerSubtitleFont(f.memory.data(),128,true);
         require(result==subtitleFontReplacementFor(f.textureId,f.color,factor),"Repeated current-font registration invalidated vector cache");
         unsigned changed=0,covered=0;
         for(unsigned y=7*factor;y<24*factor;++y)for(unsigned x=4*factor;x<12*factor;++x) {
@@ -93,7 +136,7 @@ static void subtitleFontCpuContract() {
     previewObserveImage(f.memory.data(),64,f.textureId,0);
     require(!subtitleFontReplacementFor(f.textureId,f.color,4) &&
         !subtitleFontReplacementFor(f.textureId,f.alpha,4),"Reused texture ID inherited font metadata");
-    registerSubtitleFont(f.memory.data(),128);
+    registerSubtitleFont(f.memory.data(),128,true);
     require(bool(subtitleFontReplacementFor(f.textureId,f.color,4)),"New captured generation did not register");
     SubtitleFontFixture modern(60105,true);
     require(bool(subtitleFontReplacementFor(modern.textureId,modern.color,4)),"Modern color upload did not register");
@@ -102,7 +145,7 @@ static void subtitleFontCpuContract() {
     previewPrepareTexture(modern.textureId);previewPublishTexture(modern.textureId,0x80000000u+modern.textureId,reuploaded);
     require(!subtitleFontReplacementFor(modern.textureId,modern.color,4) &&
         !subtitleFontReplacementFor(modern.textureId,reuploaded,4),"Modern reused ID inherited stale glyph metadata");
-    registerSubtitleFont(modern.memory.data(),128);
+    registerSubtitleFont(modern.memory.data(),128,true);
     require(bool(subtitleFontReplacementFor(modern.textureId,reuploaded,4)),"Modern new generation did not register");
     SubtitleFontFixture late(60109,true,64,32,true);
     ensureSubtitleFontRegistered(late.memory.data(),128);
@@ -118,7 +161,7 @@ static void subtitleFontCpuContract() {
     // A new invalid load cannot attach an ambiguous UV map to its new atlas.
     previewObserveImage(overlap.memory.data(),64,overlap.textureId,0);
     put(overlap.memory.data()+512+40,std::bit_cast<uint32_t>(0.f));
-    registerSubtitleFont(overlap.memory.data(),128);
+    registerSubtitleFont(overlap.memory.data(),128,true);
     require(!subtitleFontReplacementFor(overlap.textureId,overlap.color,4),"Overlapping glyph cells accepted");
     ColorImage oversized;oversized.width=4096;oversized.height=1;oversized.pixels.resize(4096*4);
     require(!oversized.valid(),"Authored image cap changed");oversized.generatedSubtitleFont=true;
@@ -135,14 +178,14 @@ static void subtitleFontCpuContract() {
     require(!subtitleFontReplacementFor(unavailable.textureId,unavailable.color,2) &&
         subtitleFontRasterizerAttempts()==attempts+2,"CPU font failure suppressed a new raster density");
     unavailable.memory[512+33]='B';
-    registerSubtitleFont(unavailable.memory.data(),128);
+    registerSubtitleFont(unavailable.memory.data(),128,true);
     require(!subtitleFontReplacementFor(unavailable.textureId,unavailable.color,4) &&
         subtitleFontRasterizerAttempts()==attempts+3,"CPU font failure suppressed a new definition generation");
     forceSubtitleFontRasterizerUnavailable(false);
     require(!subtitleFontReplacementFor(unavailable.textureId,unavailable.color,4) &&
         subtitleFontRasterizerAttempts()==attempts+3,"Failed font retried unchanged generation after availability change");
     unavailable.memory[512+33]='A';
-    registerSubtitleFont(unavailable.memory.data(),128);
+    registerSubtitleFont(unavailable.memory.data(),128,true);
     require(bool(subtitleFontReplacementFor(unavailable.textureId,unavailable.color,4)) &&
         subtitleFontRasterizerAttempts()==attempts+4,"Fresh font generation did not recover after rasterizer failure");
     std::puts("SubtitleFont CPU: vector2/4/8 density, glyph/blank/fallback bounds, codepages, immutable cache and generation guards passed.");
@@ -193,6 +236,11 @@ static void subtitleFontWorldContract(ID3D11Device* device,ID3D11DeviceContext* 
     require(vector!=original,"Subtitle world output did not gain vector detail");
     require(renderer.readSurface(60112,true)==depth,"Subtitle changed depth/stencil");
     draw.subtitle=false;require(render()==original,"Unrelated font draw used replacement atlas");
+    SubtitleFontFixture darkness(60124,true,64,32,false,"DARKNESS");
+    draw.subtitle=true;draw.textureIds[0]=darkness.textureId;draw.textures[0]=darkness.color;
+    require(render()==original,"Darkness world subtitle changed original lettering");
+    subtitleFontBoundTexture(context,0,64,32,false,7);
+    draw.textureIds[0]=f.textureId;draw.textures[0]=f.color;
     draw.subtitle=true;draw.constants.vectors[10][3]=.35f;
     const auto faded=render();require(faded!=vector && faded!=original,"Subtitle fade was lost");
     require(geometry->vertices==originalGeometry && f.color->pixels.size()==64*32*4,"Native geometry/atlas mutated");
@@ -245,6 +293,12 @@ static void subtitleFontSimpleContract(ID3D11Device* device,ID3D11DeviceContext*
     unsigned differences=0;size_t index=0;
     for(unsigned y=360;y<1080;y+=72)for(unsigned x=30;x<95;x+=8)differences+=renderer.readPixel(x,y)!=original[index++];
     require(differences>0,"Simple alpha subtitles did not use vector detail");
+    SubtitleFontFixture darkness(60125,false,64,32,false,"DARKNESS");
+    mesh.texture=darkness.alpha;mesh.textureId=darkness.textureId;
+    renderer.render({mesh});subtitleFontBoundTexture(context,0,64,32,false);
+    index=0;
+    for(unsigned y=360;y<1080;y+=72)for(unsigned x=30;x<95;x+=8)
+        require(renderer.readPixel(x,y)==original[index++],"Darkness simple subtitle changed original lettering");
     std::puts("SubtitleFont Simple GPU: owned alpha path gained vector coverage with linear base-level atlas sampling.");
 }
 static void subtitleFontContract(ID3D11Device* device,ID3D11DeviceContext* context) {
