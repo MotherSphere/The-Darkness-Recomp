@@ -2215,8 +2215,9 @@ PPC_FUNC(sub_82347838) {
 extern "C" PPC_FUNC(__imp__sub_8238B6B8);
 PPC_FUNC(sub_8238B6B8) {
     const uint32_t font = ctx.r3.u32;
+    const bool replaceable = subtitleFontResourceAllowsReplacement(base, ctx.r4.u32);
     __imp__sub_8238B6B8(ctx, base);
-    registerSubtitleFont(base, font);
+    registerSubtitleFont(base, font, replaceable);
 }
 namespace {
 // Narration, FMV and actor captions share this renderer through paired

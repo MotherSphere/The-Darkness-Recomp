@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 namespace DarkRecomp::Native {
@@ -304,8 +305,38 @@ uint32_t subtitleFontCodepoint(uint16_t guestCode,bool russian) noexcept {
     const char byte=char(guestCode);wchar_t codepoint=0;
     return MultiByteToWideChar(russian?1251:1252,0,&byte,1,&codepoint,1)==1?uint32_t(codepoint):uint32_t(guestCode);
 }
-void registerSubtitleFont(uint8_t* base,uint32_t font) noexcept {
+bool subtitleFontResourceAllowsReplacement(uint8_t* base,uint32_t resource) noexcept {
+    // CStr::Str (821F76B8): +4 points at a big-endian flags word followed
+    // by narrow characters. Wide/invalid strings do not authorize substitution.
+    uint32_t buffer=0;
+    uint8_t flags[2]{};
+    if(!word(base,uint64_t(resource)+4,buffer) || !copy(base,buffer,flags,2) || (be16(flags)&0xa000))return false;
+    std::array<char,260> name{};
+    for(size_t i=0;i<name.size();++i) {
+        if(!copy(base,uint64_t(buffer)+2+i,&name[i],1))return false;
+        if(name[i])continue;
+        std::string_view leaf(name.data(),i);
+        const auto slash=leaf.find_last_of("\\/:");
+        if(slash!=leaf.npos)leaf.remove_prefix(slash+1);
+        leaf=leaf.substr(0,leaf.find('.'));
+        const bool replaceable=leaf.size()==4 && (leaf[0]=='T' || leaf[0]=='t') &&
+            (leaf[1]=='E' || leaf[1]=='e') && (leaf[2]=='X' || leaf[2]=='x') && (leaf[3]=='T' || leaf[3]=='t');
+        if(diagnostics())std::fprintf(stderr,"[SubtitleFontTrace] resource=%s replaceable=%u\n",name.data(),unsigned(replaceable));
+        return replaceable;
+    }
+    return false;
+}
+void registerSubtitleFont(uint8_t* base,uint32_t font,bool replaceable) noexcept {
     try {
+        if(!replaceable) {
+            uint32_t id=0;
+            if(!word(base,uint64_t(font)+88,id))return;
+            std::lock_guard lock(registryMutex);
+            std::erase_if(registrations,[&](const auto& entry){
+                return entry.definition->font==font && entry.definition->textureId==id;
+            });
+            return;
+        }
         const char* reason="unknown";
         auto definition=snapshot(base,font,reason);
         static std::atomic<unsigned> lines{0};
@@ -324,7 +355,8 @@ void registerSubtitleFont(uint8_t* base,uint32_t font) noexcept {
            definition->color->width!=definition->width || definition->color->height!=definition->height))definition->color.reset();
         if(tracing)std::fprintf(stderr,"[SubtitleFontTrace] register-owned id=%u size=%ux%u alpha=%p color=%p\n",
             definition->textureId,definition->width,definition->height,definition->alpha.get(),definition->color.get());
-        if(!definition->alpha && !definition->color)return;
+        // Keep approved metadata when loading precedes the first atlas upload.
+        // The lazy retry must never authorize a decorative font by itself.
         std::lock_guard lock(registryMutex);
         const auto existing=std::find_if(registrations.begin(),registrations.end(),
             [&](const auto& entry){return entry.definition->textureId==definition->textureId;});
@@ -350,10 +382,10 @@ void ensureSubtitleFontRegistered(uint8_t* base,uint32_t font) noexcept {
             std::lock_guard lock(registryMutex);
             const auto existing=std::find_if(registrations.begin(),registrations.end(),
                 [&](const auto& entry){return entry.definition->textureId==id;});
-            if(existing!=registrations.end() && existing->definition->font==font &&
-               existing->definition->alpha==alpha && existing->definition->color==color)return;
+            if(existing==registrations.end() || existing->definition->font!=font)return;
+            if(existing->definition->alpha==alpha && existing->definition->color==color)return;
         }
-        registerSubtitleFont(base,font);
+        registerSubtitleFont(base,font,true);
     } catch(...) {}
 }
 std::shared_ptr<const ColorImage> subtitleFontReplacementFor(uint32_t textureId,const std::shared_ptr<const ColorImage>& source,unsigned factor) noexcept {

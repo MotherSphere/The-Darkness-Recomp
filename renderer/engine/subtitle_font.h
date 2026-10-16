@@ -4,9 +4,12 @@
 #include <memory>
 
 namespace DarkRecomp::Native {
-// Snapshot the completed original bitmap-font definition. The render consumer
-// reads no guest memory; only its single primary atlas is supported.
-void registerSubtitleFont(uint8_t* base, uint32_t font) noexcept;
+// Only the ordinary TEXT resource may use replacement glyphs. Read its original
+// CStr before the font loader consumes it; decorative/unknown fonts stay native.
+bool subtitleFontResourceAllowsReplacement(uint8_t* base, uint32_t resource) noexcept;
+// Snapshot the completed definition, including loads before the lazy upload.
+// A rejected load also invalidates an earlier definition at the reused address.
+void registerSubtitleFont(uint8_t* base, uint32_t font, bool replaceable) noexcept;
 // A completed font load can precede its lazy atlas upload. Verified subtitle
 // producers may retry against their current font and captured owned generation.
 void ensureSubtitleFontRegistered(uint8_t* base, uint32_t font) noexcept;
